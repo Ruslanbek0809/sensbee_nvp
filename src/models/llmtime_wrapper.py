@@ -1,5 +1,5 @@
 """
-Minimal LLMTime wrapper for zero-shot time series forecasting using OpenAI API.
+Minimal LLMTime wrapper for zero-shot time series forecasting using various LLM APIs.
 
 This is a simplified implementation that follows the LLMTime idea of converting
 numbers to text and using zero-shot completion, without the full serialization pipeline.
@@ -11,7 +11,6 @@ import re
 from typing import Optional
 
 import numpy as np
-import openai
 import pandas as pd
 from dotenv import load_dotenv
 
@@ -21,20 +20,10 @@ load_dotenv()
 logger = logging.getLogger(__name__)
 
 # Default model name
-DEFAULT_MODEL = "gpt-4o-mini"
+DEFAULT_MODEL = "mistral-small-latest" # DEFAULT: Mistral Small (has free tier)
 
-
+# Convert a time series to a simple English prompt for forecasting.
 def encode_series_to_prompt(series: pd.Series, horizon: int) -> str:
-    """
-    Convert a time series to a simple English prompt for forecasting.
-    
-    Args:
-        series: Time series data (pandas Series)
-        horizon: Number of future values to predict
-        
-    Returns:
-        String prompt asking the model to predict the next values
-    """
     if len(series) == 0:
         raise ValueError("Series cannot be empty")
     
@@ -67,33 +56,101 @@ def encode_series_to_prompt(series: pd.Series, horizon: int) -> str:
     return prompt
 
 
+# Calls Mistral API to get a text completion.
+def call_mistral_completion(prompt: str, model: Optional[str] = None) -> str:
+    try:
+        from mistralai import Mistral
+        
+        api_key = os.getenv("MISTRAL_API_KEY")
+        if not api_key:
+            raise ValueError(
+                "MISTRAL_API_KEY not found. Get a free key at https://console.mistral.ai/"
+            )
+        
+        model_name = model or os.getenv("MISTRAL_MODEL", "mistral-small-latest")
+        client = Mistral(api_key=api_key)
+        
+        logger.debug(f"Calling Mistral API with model: {model_name}")
+        
+        response = client.chat.complete(
+            model=model_name,
+            messages=[
+                {
+                    "role": "system",
+                    "content": "You are a helpful assistant that predicts time series values. Return only numbers separated by commas.",
+                },
+                {"role": "user", "content": prompt},
+            ],
+            temperature=0.3,
+            max_tokens=200,
+        )
+        
+        return response.choices[0].message.content.strip()
+        
+    except ImportError:
+        raise ImportError(
+            "mistralai package not installed. Install with: pip install mistralai"
+        )
+    except Exception as e:
+        logger.error(f"Mistral API call failed: {e}")
+        raise
+
+
+# Calls Groq API to get a text completion.
+def call_groq_completion(prompt: str, model: Optional[str] = None) -> str:
+    try:
+        from groq import Groq
+        
+        api_key = os.getenv("GROQ_API_KEY")
+        if not api_key:
+            raise ValueError(
+                "GROQ_API_KEY not found. Get a free key at https://console.groq.com/"
+            )
+        
+        model_name = model or os.getenv("GROQ_MODEL", "llama-3.1-8b-instant")
+        client = Groq(api_key=api_key)
+        
+        logger.debug(f"Calling Groq API with model: {model_name}")
+        
+        response = client.chat.completions.create(
+            model=model_name,
+            messages=[
+                {
+                    "role": "system",
+                    "content": "You are a helpful assistant that predicts time series values. Return only numbers separated by commas.",
+                },
+                {"role": "user", "content": prompt},
+            ],
+            temperature=0.3,
+            max_tokens=200,
+        )
+        
+        return response.choices[0].message.content.strip()
+        
+    except ImportError:
+        raise ImportError(
+            "groq package not installed. Install with: pip install groq"
+        )
+    except Exception as e:
+        logger.error(f"Groq API call failed: {e}")
+        raise
+
+
+# Call OpenAI API to get a text completion for the prompt.
 def call_openai_completion(prompt: str, model: Optional[str] = None) -> str:
-    """
-    Call OpenAI API to get a text completion for the prompt.
+    import openai
     
-    Args:
-        prompt: The prompt string
-        model: Model name (defaults to env var OPENAI_MODEL or gpt-4o-mini)
-        
-    Returns:
-        Response text from the model
-        
-    Raises:
-        Exception: If the API call fails
-    """
     # Get model name from env var or use default
-    model_name = model or os.getenv("OPENAI_MODEL", DEFAULT_MODEL)
+    model_name = model or os.getenv("OPENAI_MODEL", "gpt-4o-mini")
     
-    # Set temperature and max_tokens based on model
-    # Lower temperature for more deterministic forecasts
+    # Set temperature and max_tokens
     temperature = 0.3
-    # Estimate max_tokens: roughly 10 tokens per number (conservative)
-    max_tokens = 200  # Should be enough for most horizons
+    max_tokens = 200
     
     try:
         logger.debug(f"Calling OpenAI API with model: {model_name}")
         
-        # Use ChatCompletion for newer models (gpt-4, gpt-3.5-turbo, etc.)
+        # Use ChatCompletion for newer models
         if model_name.startswith("gpt-4") or model_name.startswith("gpt-3.5"):
             response = openai.chat.completions.create(
                 model=model_name,
@@ -123,26 +180,28 @@ def call_openai_completion(prompt: str, model: Optional[str] = None) -> str:
         raise
 
 
+# Unified function to call different LLM providers.
+def call_llm_completion(prompt: str, provider: Optional[str] = None, model: Optional[str] = None) -> str:
+    # Auto-detect provider from model name or env var
+    if provider is None:
+        provider = os.getenv("LLM_PROVIDER", "mistral").lower()
+    
+    provider = provider.lower()
+    
+    if provider == "openai":
+        return call_openai_completion(prompt, model)
+    elif provider == "mistral":
+        return call_mistral_completion(prompt, model)
+    elif provider == "groq":
+        return call_groq_completion(prompt, model)
+    else:
+        raise ValueError(
+            f"Unknown provider: {provider}. Supported: 'openai', 'mistral', 'groq'"
+        )
+
+
+# Extract numeric values from the model's text response. Handles various response formats.
 def parse_forecast_from_text(response: str, horizon: int) -> np.ndarray:
-    """
-    Extract numeric values from the model's text response.
-    
-    This function is robust and handles various response formats:
-    - "1.5, 2.3, 4.7"
-    - "The next values are: 1.5, 2.3, 4.7"
-    - "1.5\n2.3\n4.7"
-    - etc.
-    
-    Args:
-        response: Text response from the model
-        horizon: Expected number of values
-        
-    Returns:
-        numpy array of forecast values
-        
-    Raises:
-        ValueError: If insufficient valid numbers are found
-    """
     if not response:
         raise ValueError("Empty response from model")
     
@@ -178,22 +237,13 @@ def parse_forecast_from_text(response: str, horizon: int) -> np.ndarray:
     return np.array(values)
 
 
-def llmtime_forecast(series: pd.Series, horizon: int) -> np.ndarray:
-    """
-    Generate a forecast using the LLMTime approach: convert series to text,
-    get zero-shot completion from OpenAI, and parse the result.
-    
-    Args:
-        series: Time series data (pandas Series)
-        horizon: Number of steps to forecast ahead
-        
-    Returns:
-        numpy array of forecast values
-        
-    Raises:
-        ValueError: If series is empty or other validation fails
-        Exception: If API call or parsing fails
-    """
+# Generate a forecast using the LLMTime approach: convert series to text, get zero-shot completion from an LLM API, and parse the result.
+def llmtime_forecast(
+    series: pd.Series,
+    horizon: int,
+    provider: Optional[str] = None,
+    model: Optional[str] = None,
+) -> np.ndarray:
     if len(series) == 0:
         raise ValueError("Series cannot be empty for forecasting")
     
@@ -204,8 +254,8 @@ def llmtime_forecast(series: pd.Series, horizon: int) -> np.ndarray:
     prompt = encode_series_to_prompt(series, horizon)
     logger.debug(f"Generated prompt (first 200 chars): {prompt[:200]}...")
     
-    # Step 2: Call OpenAI API
-    response = call_openai_completion(prompt)
+    # Step 2: Call LLM API
+    response = call_llm_completion(prompt, provider=provider, model=model)
     logger.debug(f"Received response (first 200 chars): {response[:200]}...")
     
     # Step 3: Parse forecast from response
@@ -213,4 +263,3 @@ def llmtime_forecast(series: pd.Series, horizon: int) -> np.ndarray:
     logger.info(f"Generated forecast of length {len(forecast)}")
     
     return forecast
-
