@@ -14,63 +14,8 @@ project_root = os.path.dirname(__file__)
 sys.path.insert(0, project_root)
 
 from src.models.llmtime_wrapper import (
-    encode_series_to_prompt,
-    parse_forecast_from_text,
     llmtime_forecast,
 )
-
-# Test the encode_series_to_prompt function.
-def test_encode():
-    print("=" * 60)
-    print("Testing encode_series_to_prompt")
-    print("=" * 60)
-    
-    # Test with float values
-    series1 = pd.Series([20.1, 20.3, 20.7, 21.0, 21.2])
-    prompt1 = encode_series_to_prompt(series1, horizon=3)
-    print(f"\nSeries: {series1.tolist()}")
-    print(f"Horizon: 3")
-    print(f"Prompt:\n{prompt1}\n")
-    
-    # Test with integer values
-    series2 = pd.Series([100, 105, 110, 115, 120])
-    prompt2 = encode_series_to_prompt(series2, horizon=5)
-    print(f"\nSeries: {series2.tolist()}")
-    print(f"Horizon: 5")
-    print(f"Prompt:\n{prompt2}\n")
-    
-    print("✓ encode_series_to_prompt tests passed!")
-
-
-def test_full_with_mock():
-    """Test the full pipeline with a mock response (no API call)."""
-    print("=" * 60)
-    print("Testing full pipeline (mock)")
-    print("=" * 60)
-    
-    # Create test series
-    series = pd.Series([20.1, 20.3, 20.7, 21.0, 21.2, 21.5])
-    horizon = 3
-    
-    print(f"\nInput series: {series.tolist()}")
-    print(f"Horizon: {horizon}")
-    
-    # Step 1: Encode
-    prompt = encode_series_to_prompt(series, horizon)
-    print(f"\nGenerated prompt:\n{prompt}")
-    
-    # Step 2: Simulate API response
-    mock_response = "21.8, 22.0, 22.2"
-    print(f"\nMock API response: {mock_response}")
-    
-    # Step 3: Parse
-    forecast = parse_forecast_from_text(mock_response, horizon)
-    print(f"\nParsed forecast: {forecast}")
-    # print(f"Forecast type: {type(forecast)}")
-    # print(f"Forecast shape: {forecast.shape}")
-    
-    print("\n✓ Full pipeline (mock) test passed!")
-
 
 # Test the full pipeline with actual LLM API (requires API key).
 def test_full_with_api(provider: str = None):
@@ -96,20 +41,20 @@ def test_full_with_api(provider: str = None):
     if provider == "mistral":
         api_key = os.getenv("MISTRAL_API_KEY")
         if not api_key:
-            print("⚠️ MISTRAL_API_KEY not found in environment variables. You can get a free key at: https://console.mistral.ai/")
+            print("MISTRAL_API_KEY not found in environment variables. You can get a free key at: https://console.mistral.ai/")
             return
     elif provider == "groq":
         api_key = os.getenv("GROQ_API_KEY")
         if not api_key:
-            print("⚠️ GROQ_API_KEY not found in environment variables. You can get a free key at: https://console.groq.com/")
+            print("GROQ_API_KEY not found in environment variables. You can get a free key at: https://console.groq.com/")
             return  
     elif provider == "openai":
         api_key = os.getenv("OPENAI_API_KEY")
         if not api_key:
-            print("⚠️ OPENAI_API_KEY not found in environment variables. You can get a key at: https://platform.openai.com/")
+            print("OPENAI_API_KEY not found in environment variables. You can get a key at: https://platform.openai.com/")
             return
     else:
-        print(f"❌ Unknown provider: {provider}. Supported providers for now: mistral, groq, openai")
+        print(f"Unknown provider: {provider}. Supported providers for now: mistral, groq, openai")
         return
     
     # Create test series
@@ -175,18 +120,10 @@ Examples:
     
     args = parser.parse_args()
     
-    if args.test_encode:
-        test_encode()
-    elif args.test_full:
+    if args.test_full:
         test_full_with_api(provider=args.provider)
-    elif args.test_mock:
-        test_full_with_mock()
     else:
-        # Run all tests except API test by default
-        print("Running all tests (except API test)...")
-        test_encode()
-        print()
-        test_full_with_mock()
+        print("No other parts to test")
 
 if __name__ == "__main__":
     main()
