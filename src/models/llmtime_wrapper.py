@@ -8,49 +8,91 @@ numbers to text and using zero-shot completion, without the full serialization p
 import logging
 import os
 import re
+from pathlib import Path
 from typing import Optional
 
 import numpy as np
 import pandas as pd
 from dotenv import load_dotenv
 
+from ..data_access.data_loader import load_sensor_series_from_json
+
 # Load environment variables
 load_dotenv()
 
 logger = logging.getLogger(__name__)
 
-# Default model name
-DEFAULT_MODEL = "mistral-small-latest" # DEFAULT: Mistral Small (has free tier)
+# Get context for urban sensor types (based on SensBee smart city sensors)
+def get_sensor_context(column_name: str) -> dict:
+    col = column_name.lower()
+    
+    if "temperature" in col or "temp" in col:
+        return {
+            "type": "temperature",
+            "unit": "°C",
+            "pattern": "daily cycles and weather fronts",
+            "range": "-15 to 30"
+        }
+    elif "humidity" in col:
+        return {
+            "type": "relative humidity",
+            "unit": "%",
+            "pattern": "0–100% with daily cycles and spikes during rain",
+            "range": "0 to 100"
+        }
+    else:
+        return {
+            "type": "sensor value",
+            "unit": "",
+            "pattern": "generic time-series patterns",
+            "range": "possible values for this sensor"
+        }
 
-# Convert a time series to a simple English prompt for forecasting.
-def encode_series_to_prompt(series: pd.Series, horizon: int) -> str:
+
+# Convert a time series to a context-aware prompt for forecasting.
+def encode_series_to_prompt(
+    series: pd.Series,
+    horizon: int,
+    column_name: str = "value",
+    sampling_minutes: int = 15,
+) -> str:
     if len(series) == 0:
         raise ValueError("Series cannot be empty")
     
-    # Convert series to list of values, format to reasonable precision
-    values = series.tolist()
+    # Use only the last 7 days (for 15-min data this is 7*24*4 = 672 points)
+    max_points = 7 * 24 * (60 // sampling_minutes)
+    if len(series) > max_points:
+        series = series.iloc[-max_points:]
     
-    # Format values: use 2 decimal places for floats, integers as-is
+    # Convert to numeric values
+    values = series.astype(float).tolist()
+    
+    # Format numbers compactly
     formatted_values = []
-    for val in values:
-        if isinstance(val, (int, np.integer)):
-            formatted_values.append(str(val))
-        elif isinstance(val, (float, np.floating)):
-            # Round to 2 decimal places, remove trailing zeros
-            formatted_val = f"{val:.2f}".rstrip("0").rstrip(".")
-            formatted_values.append(formatted_val)
+    for v in values:
+        if isinstance(v, (int, np.integer)):
+            formatted_values.append(str(int(v)))
         else:
-            # Fallback: convert to string
-            formatted_values.append(str(val))
+            formatted_values.append(("{:.2f}".format(float(v))).rstrip("0").rstrip("."))
     
-    # Create comma-separated list
-    values_str = ", ".join(formatted_values)
+    # Only show the tail to keep the prompt short (~ last 200 points = ~2 days at 15min)
+    tail_len = 200
+    shown = formatted_values[-tail_len:]
+    values_str = ", ".join(shown)
+    if len(formatted_values) > tail_len:
+        values_str = "... " + values_str
     
-    # Build prompt
+    # Get sensor context
+    context = get_sensor_context(column_name)
+    
+    # Calculate history length in hours
+    history_hours = len(series) * sampling_minutes / 60.0
+    
+    # Build compact prompt (output format handled by system message, not duplicated here)
     prompt = (
-        f"Given the following time series: {values_str}, "
-        f"predict the next {horizon} values. "
-        f"Return only the {horizon} numbers separated by commas, without any explanation."
+        f"Forecast{context['type']} ({context['unit']}) for Ilmenau urban sensors. Interval: {sampling_minutes}min. "
+        f"Pattern: {context['pattern']}. Range: {context.get('range', 'realistic')}.\n\n. Recent: {values_str}\n\n"
+        f"Predict next {horizon} values. Requirements: realistic fluctuations, daily cycles, avoid linear trends, stay in range."
     )
     
     return prompt
@@ -67,7 +109,7 @@ def call_mistral_completion(prompt: str, model: Optional[str] = None) -> str:
                 "MISTRAL_API_KEY not found. Get a free key at https://console.mistral.ai/"
             )
         
-        model_name = model or os.getenv("MISTRAL_MODEL", "mistral-small-latest")
+        model_name = model or os.getenv("MISTRAL_MODEL", "mistral-medium-2508") # mistral-medium-2508
         client = Mistral(api_key=api_key)
         
         logger.debug(f"Calling Mistral API with model: {model_name}")
@@ -77,12 +119,14 @@ def call_mistral_completion(prompt: str, model: Optional[str] = None) -> str:
             messages=[
                 {
                     "role": "system",
-                    "content": "You are a helpful assistant that predicts time series values. Return only numbers separated by commas.",
+                    "content": (
+                        "Forecast urban sensor time series. Output only numbers separated by commas."
+                    ), # Content here is general instructions for the model like role definition. 
                 },
-                {"role": "user", "content": prompt},
+                {"role": "user", "content": prompt}, # Prompt is task-specific instructions
             ],
-            temperature=0.3,
-            max_tokens=200,
+            temperature=0.5,
+            # max_tokens=400,  # Enough for 96-step forecasts
         )
         
         return response.choices[0].message.content.strip()
@@ -117,7 +161,7 @@ def call_groq_completion(prompt: str, model: Optional[str] = None) -> str:
             messages=[
                 {
                     "role": "system",
-                    "content": "You are a helpful assistant that predicts time series values. Return only numbers separated by commas.",
+                    "content": "Forecast urban sensor time series. Output only numbers separated by commas.",
                 },
                 {"role": "user", "content": prompt},
             ],
@@ -157,7 +201,7 @@ def call_openai_completion(prompt: str, model: Optional[str] = None) -> str:
                 messages=[
                     {
                         "role": "system",
-                        "content": "You are a helpful assistant that predicts time series values. Return only numbers separated by commas.",
+                        "content": "Forecast urban sensor time series. Output only numbers separated by commas.",
                     },
                     {"role": "user", "content": prompt},
                 ],
@@ -188,12 +232,12 @@ def call_llm_completion(prompt: str, provider: Optional[str] = None, model: Opti
     
     provider = provider.lower()
     
-    if provider == "openai":
-        return call_openai_completion(prompt, model)
-    elif provider == "mistral":
+    if provider == "mistral":
         return call_mistral_completion(prompt, model)
     elif provider == "groq":
         return call_groq_completion(prompt, model)
+    elif provider == "openai":
+        return call_openai_completion(prompt, model)
     else:
         raise ValueError(
             f"Unknown provider: {provider}. Supported: 'openai', 'mistral', 'groq'"
@@ -222,8 +266,7 @@ def parse_forecast_from_text(response: str, horizon: int) -> np.ndarray:
     # Take the first 'horizon' values
     if len(values) < horizon:
         logger.warning(
-            f"Only found {len(values)} values in response, expected {horizon}. "
-            f"Response: {response}"
+            f"Only found {len(values)} values in response, expected {horizon}. Response: {response}"
         )
         # Pad with the last value if we have at least one
         if len(values) > 0:
@@ -236,13 +279,13 @@ def parse_forecast_from_text(response: str, horizon: int) -> np.ndarray:
     
     return np.array(values)
 
-
-# Generate a forecast using the LLMTime approach: convert series to text, get zero-shot completion from an LLM API, and parse the result.
+# Generate forecast with context-aware prompts that use history effectively.
 def llmtime_forecast(
     series: pd.Series,
     horizon: int,
     provider: Optional[str] = None,
     model: Optional[str] = None,
+    column_name: str = "value",
 ) -> np.ndarray:
     if len(series) == 0:
         raise ValueError("Series cannot be empty for forecasting")
@@ -250,9 +293,18 @@ def llmtime_forecast(
     if horizon <= 0:
         raise ValueError("Horizon must be positive")
     
-    # Step 1: Encode series to prompt
-    prompt = encode_series_to_prompt(series, horizon)
-    logger.debug(f"Generated prompt (first 200 chars): {prompt[:200]}...")
+    # Step 1: Encode series to context-aware prompt
+    # Detect sampling interval from series index (assume regular intervals)
+    if len(series) >= 2:
+        time_diff = (series.index[1] - series.index[0]).total_seconds() / 60
+        sampling_minutes = int(round(time_diff))
+    else:
+        sampling_minutes = 15  # Default for SensBee 15-minute data
+    
+    prompt = encode_series_to_prompt(
+        series, horizon, column_name=column_name, sampling_minutes=sampling_minutes
+    )
+    logger.debug(f"Generated prompt (first 300 chars): {prompt[:300]}...")
     
     # Step 2: Call LLM API
     response = call_llm_completion(prompt, provider=provider, model=model)
@@ -263,3 +315,187 @@ def llmtime_forecast(
     logger.info(f"Generated forecast of length {len(forecast)}")
     
     return forecast
+
+
+# Load any urban sensor series from local JSON file and generate LLM forecast.
+def forecast_sensor_from_fixture(
+    column_name: str = "temperature",
+    horizon_hours: int = 24,
+    provider: Optional[str] = None,
+    model: Optional[str] = None,
+    history_hours: int = 24 * 7,
+) -> np.ndarray:
+    # Path to the data file
+    data_path = Path(__file__).parent.parent.parent / "data" / "real_sensbee_json_data.json"
+    
+    logger.info(f"Loading {column_name} data from {data_path}")
+    
+    # Load sensor series: use original 15-minute intervals
+    series = load_sensor_series_from_json(
+        path=str(data_path),
+        column_name=column_name,
+        resample_rule=None,  # Use original 15-minute intervals (no resampling for now)
+        history_hours=history_hours,
+    )
+    
+    logger.info(
+        f"Loaded {len(series)} points of {column_name} data (range: {series.index.min()} to {series.index.max()})"
+    )
+    
+    # Calculate horizon in steps based on sampling interval (15 minutes = 4 steps per hour)
+    if len(series) >= 2:
+        sampling_interval_minutes = (series.index[1] - series.index[0]).total_seconds() / 60
+        steps_per_hour = 60 / sampling_interval_minutes
+        horizon_steps = int(horizon_hours * steps_per_hour)
+    else:
+        horizon_steps = horizon_hours * 4  # Fallback: assume 15-minute intervals (4 per hour)
+    
+    logger.info(
+        f"Forecasting {horizon_hours} hours = {horizon_steps} steps at {sampling_interval_minutes:.0f}-minute intervals"
+    )
+    
+    # Generate forecast using LLM (with column name for context-aware prompts)
+    forecast = llmtime_forecast(
+        series=series,
+        horizon=horizon_steps,
+        provider=provider,
+        model=model,
+        column_name=column_name,  # Context-aware prompts
+    )
+    
+    return forecast
+
+
+# Convenience function: Load temperature data from JSON and generate LLM forecast.
+def forecast_temperature_from_fixture(
+    horizon_hours: int = 24,
+    provider: Optional[str] = None,
+    model: Optional[str] = None,
+) -> np.ndarray:
+    return forecast_sensor_from_fixture(
+        column_name="temperature",
+        horizon_hours=horizon_hours,
+        provider=provider,
+        model=model,
+        history_hours=24 * 7,  # 7 days
+    )
+
+
+# CLI entry point for running forecasts from command line
+if __name__ == "__main__":
+    import argparse
+    import sys
+    
+    parser = argparse.ArgumentParser(
+        description="Generate LLM forecast for temperature from local JSON data (15-minute interval)",
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        epilog="""
+Examples:
+  python -m src.models.llmtime_wrapper --horizon 24
+  python -m src.models.llmtime_wrapper --horizon 48 --provider groq
+  python -m src.models.llmtime_wrapper --horizon 24 --provider openai --model gpt-4o-mini
+  
+Note: Forecasts use 15-minute intervals. 24 hours = 96 steps (4 steps per hour).
+        """,
+    )
+    parser.add_argument(
+        "--horizon",
+        type=int,
+        default=24,
+        help="Number of hours to forecast ahead (default: 24). At 15-min resolution, this equals 4*horizon steps.",
+    )
+    parser.add_argument(
+        "--provider",
+        type=str,
+        choices=["mistral", "groq", "openai"],
+        default="mistral",
+        help="LLM provider to use (default: mistral)",
+    )
+    parser.add_argument(
+        "--model",
+        type=str,
+        default=None,
+        help="Optional model name (uses provider default if not specified)",
+    )
+    parser.add_argument(
+        "--verbose",
+        action="store_true",
+        help="Enable verbose logging",
+    )
+    
+    args = parser.parse_args()
+    
+    # Configure logging
+    level = logging.DEBUG if args.verbose else logging.INFO
+    logging.basicConfig(
+        level=level,
+        format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
+    )
+    
+    try:
+        print("=" * 60)
+        print("LLM Temperature Forecast (15-minute intervals)")
+        print("=" * 60)
+        print(f"Forecast horizon: {args.horizon} hours ({args.horizon * 4} steps at 15-min intervals). Provider: {args.provider}")
+        if args.model:
+            print(f"Model: {args.model}")
+        print()
+        print("Loading data and generating forecast...")
+        print()
+        
+        # Generate forecast
+        forecast = forecast_temperature_from_fixture(
+            horizon_hours=args.horizon,
+            provider=args.provider,
+            model=args.model,
+        )
+        
+        # Get last timestamp from data (needed for Grafana format)
+        data_path = Path(__file__).parent.parent.parent / "data" / "real_sensbee_json_data.json"
+        series = load_sensor_series_from_json(
+            path=str(data_path),
+            column_name="temperature",
+            resample_rule=None,
+            history_hours=24*7
+        )
+        last_timestamp = series.index[-1]
+        
+        # Print results
+        print("=" * 60)
+        print("Forecast Results")
+        print("=" * 60)
+        steps_per_hour = 4
+        total_steps = len(forecast)
+        total_hours = total_steps / steps_per_hour
+        
+        print(f"\nForecast: {total_steps} points at 15-min intervals ({total_hours:.1f} hours)")
+        print(f"Starting from: {last_timestamp}")
+        print(f"Ending at: {last_timestamp + pd.Timedelta(minutes=15 * total_steps)}")
+        
+        # Show all points grouped by hour
+        print(f"\nAll {total_steps} forecasted values (15-min intervals):")
+        for hour in range(int(total_hours) + (1 if total_steps % steps_per_hour > 0 else 0)):
+            start_idx = hour * steps_per_hour
+            end_idx = min((hour + 1) * steps_per_hour, total_steps)
+            if start_idx < total_steps:
+                print(f"\nHour {hour + 1:2d} (steps {start_idx + 1:3d}-{end_idx:3d}):")
+                for step_in_hour in range(end_idx - start_idx):
+                    idx = start_idx + step_in_hour
+                    timestamp = last_timestamp + pd.Timedelta(minutes=15 * (idx + 1))
+                    minute = step_in_hour * 15
+                    print(f"  {timestamp.strftime('%H:%M')} (+{minute:2d}min): {forecast[idx]:6.2f}°C")
+        
+        print()
+        print("=" * 60)
+        print("✓ Forecast completed successfully!")
+        print("=" * 60)
+        
+    except KeyboardInterrupt:
+        print("\n\n⚠️  Forecast interrupted by user")
+        sys.exit(1)
+    except Exception as e:
+        print(f"\n\n❌ Error: {e}", file=sys.stderr)
+        if args.verbose:
+            import traceback
+            traceback.print_exc()
+        sys.exit(1)
