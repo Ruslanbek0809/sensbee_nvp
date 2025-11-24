@@ -35,8 +35,8 @@ The service will be available at:
 ```
 sensbee_nvp/
 ├── src/
-│   ├── data_access/    # SensBee REST API integration
-│   ├── models/         # Forecasting models (baselines + LLMTime wrapper)
+│   ├── data_access/    # SensBee data loading (local JSON)
+│   ├── models/         # LLMTime forecasting wrapper
 │   └── service/        # FastAPI REST service
 └── requirements.txt
 ```

@@ -69,7 +69,7 @@ def test_full_with_api(provider: str = None):
         # Test the full pipeline
         forecast = llmtime_forecast(series, horizon, provider=provider)
         
-        print(f"\n✓ Forecast generated successfully!")
+        print(f"\nForecast generated successfully!")
         print(f"Forecast: {forecast}")
         # print(f"Forecast type: {type[_AnyShape, dtype[Any]](forecast)}")
         # print(f"Forecast shape: {forecast.shape}")
@@ -79,10 +79,10 @@ def test_full_with_api(provider: str = None):
         assert len(forecast) == horizon, f"Expected {horizon} values, got {len(forecast)}"
         assert all(isinstance(x, (int, float)) for x in forecast), "All values should be numeric"
         
-        print(f"\n✓ Full pipeline ({provider.upper()} API) test passed!")
+        print(f"\nFull pipeline ({provider.upper()} API) test passed!")
         
     except Exception as e:
-        print(f"\n❌ Error during API call: {e}")
+        print(f"\nError during API call: {e}")
         print("\nThis could be due to: - Invalid API key, - Network issues, - API rate limits, - Insufficient API credits")
         print(f"If provider-specific issues (check {provider} documentation)")
         raise

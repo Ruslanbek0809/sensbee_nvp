@@ -75,12 +75,14 @@ def encode_series_to_prompt(
         else:
             formatted_values.append(("{:.2f}".format(float(v))).rstrip("0").rstrip("."))
     
-    # Only show the tail to keep the prompt short (~ last 200 points = ~2 days at 15min)
-    tail_len = 200
-    shown = formatted_values[-tail_len:]
-    values_str = ", ".join(shown)
-    if len(formatted_values) > tail_len:
-        values_str = "... " + values_str
+    values_str = ", ".join(formatted_values)
+
+    # # Only show the tail to keep the prompt short (~ last 200 points = ~2 days at 15min)
+    # tail_len = 200
+    # shown = formatted_values[-tail_len:]
+    # values_str = ", ".join(shown)
+    # if len(formatted_values) > tail_len:
+    #     values_str = "... " + values_str
     
     # Get sensor context
     context = get_sensor_context(column_name)
@@ -90,7 +92,7 @@ def encode_series_to_prompt(
     
     # Build compact prompt (output format handled by system message, not duplicated here)
     prompt = (
-        f"Forecast{context['type']} ({context['unit']}) for Ilmenau urban sensors. Interval: {sampling_minutes}min. "
+        f"Forecast {context['type']} ({context['unit']}) for Ilmenau urban sensors. Interval: {sampling_minutes}min. "
         f"Pattern: {context['pattern']}. Range: {context.get('range', 'realistic')}.\n\n. Recent: {values_str}\n\n"
         f"Predict next {horizon} values. Requirements: realistic fluctuations, daily cycles, avoid linear trends, stay in range."
     )
@@ -109,7 +111,7 @@ def call_mistral_completion(prompt: str, model: Optional[str] = None) -> str:
                 "MISTRAL_API_KEY not found. Get a free key at https://console.mistral.ai/"
             )
         
-        model_name = model or os.getenv("MISTRAL_MODEL", "mistral-medium-2508") # mistral-medium-2508
+        model_name = model or os.getenv("MISTRAL_MODEL", "mistral-medium-2508") # mistral-small-2506 or mistral-medium-2508
         client = Mistral(api_key=api_key)
         
         logger.debug(f"Calling Mistral API with model: {model_name}")
@@ -126,7 +128,7 @@ def call_mistral_completion(prompt: str, model: Optional[str] = None) -> str:
                 {"role": "user", "content": prompt}, # Prompt is task-specific instructions
             ],
             temperature=0.5,
-            # max_tokens=400,  # Enough for 96-step forecasts
+            max_tokens=500,  # Enough for 96-step forecasts output
         )
         
         return response.choices[0].message.content.strip()
@@ -165,8 +167,8 @@ def call_groq_completion(prompt: str, model: Optional[str] = None) -> str:
                 },
                 {"role": "user", "content": prompt},
             ],
-            temperature=0.3,
-            max_tokens=200,
+            temperature=0.5,
+            max_tokens=500,
         )
         
         return response.choices[0].message.content.strip()
@@ -188,8 +190,8 @@ def call_openai_completion(prompt: str, model: Optional[str] = None) -> str:
     model_name = model or os.getenv("OPENAI_MODEL", "gpt-4o-mini")
     
     # Set temperature and max_tokens
-    temperature = 0.3
-    max_tokens = 200
+    temperature = 0.5
+    max_tokens = 500
     
     try:
         logger.debug(f"Calling OpenAI API with model: {model_name}")
@@ -462,7 +464,7 @@ Note: Forecasts use 15-minute intervals. 24 hours = 96 steps (4 steps per hour).
         
         # Print results
         print("=" * 60)
-        print("Forecast Results")
+        print("Forecast results")
         print("=" * 60)
         steps_per_hour = 4
         total_steps = len(forecast)
@@ -487,14 +489,14 @@ Note: Forecasts use 15-minute intervals. 24 hours = 96 steps (4 steps per hour).
         
         print()
         print("=" * 60)
-        print("✓ Forecast completed successfully!")
+        print("Forecast completed successfully!")
         print("=" * 60)
         
     except KeyboardInterrupt:
-        print("\n\n⚠️  Forecast interrupted by user")
+        print("\n\nForecast interrupted by user")
         sys.exit(1)
     except Exception as e:
-        print(f"\n\n❌ Error: {e}", file=sys.stderr)
+        print(f"\n\nrror: {e}", file=sys.stderr)
         if args.verbose:
             import traceback
             traceback.print_exc()
