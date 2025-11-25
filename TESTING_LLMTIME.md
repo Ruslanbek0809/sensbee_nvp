@@ -1,8 +1,8 @@
 # Testing LLMTime Wrapper
 
-This guide explains how to test the LLMTime wrapper in `sensbee_nvp` with multiple LLM providers using local JSON sensor data.
+This is how to test the LLMTime wrapper in `sensbee_nvp` with multiple LLM providers using local JSON sensor data.
 
-### Main Entry Point: Forecast from Local JSON
+## Forecast from Local JSON
 
 The primary way to generate forecasts is using the CLI with your local JSON data:
 
@@ -23,11 +23,11 @@ python -m src.models.llmtime_wrapper --horizon 24 --provider openai --model gpt-
 python -m src.models.llmtime_wrapper --horizon 24 --verbose
 ```
 
-### Test with Real LLM APIs
+## Test with Real LLM APIs
 
 The wrapper supports multiple providers. First, set up your API keys:
 
-#### Option A: Mistral API (Free Tier)
+# Option A: Mistral API (Free Tier)
 
 ```bash
 # 1. Get free API key from https://console.mistral.ai/
@@ -38,7 +38,7 @@ echo "MISTRAL_API_KEY=your-key-here" >> .env
 python test_llmtime.py --test-full --provider mistral
 ```
 
-#### Option B: Groq (Fastest + Free Tier)
+## Option B: Groq (Fastest + Free Tier)
 
 ```bash
 # 1. Get free API key from https://console.groq.com/
@@ -49,7 +49,7 @@ echo "GROQ_API_KEY=your-key-here" >> .env
 python test_llmtime.py --test-full --provider groq
 ```
 
-#### Option C: OpenAI (Paid)
+## Option C: OpenAI (Paid)
 
 ```bash
 # 1. Get API key from https://platform.openai.com/
@@ -60,20 +60,7 @@ echo "OPENAI_API_KEY=your-key-here" >> .env
 python test_llmtime.py --test-full --provider openai
 ```
 
-
-## 🔧 Auto-Detection
-
-The wrapper automatically detects available providers:
-- If `MISTRAL_API_KEY` is set → uses Mistral (default)
-- If `GROQ_API_KEY` is set → can use Groq
-- If `OPENAI_API_KEY` is set → can use OpenAI
-
-Set `LLM_PROVIDER` in `.env` to override:
-```bash
-LLM_PROVIDER=mistral  # or 'groq' or 'openai'
-```
-
-## 📝 Environment Variables
+## Environment Variables
 
 Add to `.env` file:
 ```bash

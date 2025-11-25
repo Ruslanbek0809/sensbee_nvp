@@ -8,8 +8,7 @@ app = FastAPI(
     version="0.1.0",
 )
 
-
-# Fast way to verify the service is up without triggering business logic
+# Fast way to verify the service is up without triggering the logic
 @app.get("/health")
 async def health_check() -> dict[str, str]:
     return {"status": "ok"}
