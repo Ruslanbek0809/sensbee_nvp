@@ -12,20 +12,19 @@ logger = logging.getLogger(__name__)
 
 # Default path to the local JSON data file
 DEFAULT_DATA_PATH = Path(__file__).parent.parent.parent / "data" / "real_sensbee_json_data.json"
+DEFAULT_COLUMN_NAME = "temperature"
 
 # Load a sensor time series from a local JSON file and process it.
 def load_sensor_series_from_json(
     path: Optional[str] = None,
-    column_name: str = "temperature", # For now, default to temperature column / variable name
+    column_name: Optional[str] = None,
 ) -> pd.Series:
-    # Use default path if not provided
-    if path is None:
-        data_path = DEFAULT_DATA_PATH
-    else:
-        data_path = Path(path)
+    # Apply default parameters if not provided
+    data_path = Path(path) if path else DEFAULT_DATA_PATH
+    column_name = column_name or DEFAULT_COLUMN_NAME
     
     if not data_path.exists():
-        raise FileNotFoundError(f"Data file not found: {data_path}\n")
+        raise FileNotFoundError(f"Data file NOT FOUND: {data_path}\n")
     
     logger.info(f"LOADING sensor data from: {data_path}")
     
@@ -65,7 +64,7 @@ def load_sensor_series_from_json(
     # Select the requested column
     series = df[column_name].copy()
     
-    logger.debug(f"SERIES for requested column '{column_name}', length: {len(series)}")
+    logger.debug(f"LOADED series for column '{column_name}', length: {len(series)}")
     
     return series
 
