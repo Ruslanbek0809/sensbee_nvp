@@ -1,91 +1,59 @@
 # Testing LLMTime Wrapper
 
-This is how to test the LLMTime wrapper in `sensbee_nvp` with multiple LLM providers using local JSON sensor data.
+Test forecasting with SensBee API or local JSON data. It tests on default sensor which is Ilmenau Manebach 1 weather station. Forecast temperature for next 24 hours (96 steps at 15-min intervals)
 
-## Forecast from Local JSON
-
-The primary way to generate forecasts is using the CLI with your local JSON data:
+## Quick Test
 
 ```bash
-# Activate virtual environment
 source venv/bin/activate
 
-# Forecast temperature for next 24 hours (96 steps at 15-min intervals)
-python -m src.models.llmtime_wrapper --horizon 24
+# Test API source
+python test_llmtime.py --source api
 
-# Use different provider
-python -m src.models.llmtime_wrapper --horizon 24 --provider groq
+# Test local JSON
+python test_llmtime.py --source local
 
-# Use specific model
-python -m src.models.llmtime_wrapper --horizon 24 --provider openai --model gpt-4o-mini
-
-# Enable verbose logging
-python -m src.models.llmtime_wrapper --horizon 24 --verbose
+# Test both
+python test_llmtime.py --source both
 ```
 
-## Test with Real LLM APIs
-
-The wrapper supports multiple providers. First, set up your API keys:
-
-# Option A: Mistral API (Free Tier)
+## Full CLI Usage
 
 ```bash
-# 1. Get free API key from https://console.mistral.ai/
-# 2. Add to .env file
-echo "MISTRAL_API_KEY=your-key-here" >> .env
+# From SensBee API (uses defaults from sensbee_client.py)
+python -m src.models.llmtime_wrapper --source api
 
-# 3. Test with Mistral
-python test_llmtime.py --test-full --provider mistral
+# From local JSON (uses defaults from data_loader.py)
+python -m src.models.llmtime_wrapper --source local
+
+# Custom options
+python -m src.models.llmtime_wrapper --source api \
+  --sensor-id <UUID> \
+  --api-key <KEY> \
+  --column temperature \
+  --horizon 12 \
+  --provider mistral
 ```
 
-## Option B: Groq (Fastest + Free Tier)
+## LLM Providers
+
+Set API key in `.env`:
 
 ```bash
-# 1. Get free API key from https://console.groq.com/
-# 2. Add to .env file
-echo "GROQ_API_KEY=your-key-here" >> .env
+# Groq (default, free, fastest)
+echo "GROQ_API_KEY=your-key" >> .env
 
-# 3. Test with Groq
-python test_llmtime.py --test-full --provider groq
-```
-
-## Option C: OpenAI (Paid)
-
-```bash
-# 1. Get API key from https://platform.openai.com/
-# 2. Add to .env file
-echo "OPENAI_API_KEY=your-key-here" >> .env
-
-# 3. Test with OpenAI
-python test_llmtime.py --test-full --provider openai
-```
-
-## Environment Variables
-
-Add to `.env` file:
-```bash
-# Choose your provider (mistral, groq, or openai)
-LLM_PROVIDER=mistral
-
-# Mistral (recommended - free tier)
-MISTRAL_API_KEY=your-mistral-key
-
-# Groq (fastest - free tier)
-GROQ_API_KEY=your-groq-key
+# Mistral (free)
+echo "MISTRAL_API_KEY=your-key" >> .env
 
 # OpenAI (paid)
-OPENAI_API_KEY=your-openai-key
-OPENAI_MODEL=gpt-4o-mini
+echo "OPENAI_API_KEY=your-key" >> .env
 ```
 
-## FastAPI Service
+Then use `--provider groq|mistral|openai`.
 
-The FastAPI service currently only has a health check endpoint:
+## Default Parameters
 
-```bash
-# Start the server
-uvicorn src.service.main:app --reload
-
-# Check health
-curl http://localhost:8000/health
-```
+Edit these files to change defaults:
+- `src/data_access/sensbee_client.py` - API defaults (sensor, url, key)
+- `src/data_access/data_loader.py` - Local JSON defaults (path, column)
