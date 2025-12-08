@@ -14,7 +14,7 @@ DEFAULT_BASE_URL = "https://sensbee.smartcity.ilmenau.de:8443"
 DEFAULT_SENSOR_ID = "8d790e21-f948-4e75-9c47-ea8b1aa75e9d"
 DEFAULT_API_KEY = "f9dc9952-bc02-4f76-841a-a20035e6f574"
 DEFAULT_LIMIT = 672
-DEFAULT_ORDERING = "ASC"
+DEFAULT_ORDERING = "DESC"
 DEFAULT_COLUMN_NAME = "temperature"
 
 # Simple HTTP client for SensBee API.
@@ -68,7 +68,7 @@ class SensbeeClient:
             resp.raise_for_status()
             return resp.json()
 
-# Load a sensor time series from SensBee API. 
+# Loads a sensor time series from SensBee API. 
 def load_sensor_series_from_api(
     base_url: Optional[str] = None,
     sensor_id: Optional[str] = None,
@@ -120,3 +120,38 @@ def load_sensor_series_from_api(
     
     return series
 
+
+# # Load multiple columns from SensBee API.
+# def load_sensor_dataframe_from_api(
+#     base_url: Optional[str] = None,
+#     sensor_id: Optional[str] = None,
+#     api_key: Optional[str] = None,
+#     limit: Optional[int] = None,
+#     ordering: Optional[str] = None,
+#     columns: Optional[list[str]] = None,
+# ) -> pd.DataFrame:
+#     base_url = base_url or DEFAULT_BASE_URL
+#     sensor_id = sensor_id or DEFAULT_SENSOR_ID
+#     api_key = api_key or DEFAULT_API_KEY
+#     limit = limit or DEFAULT_LIMIT
+#     ordering = ordering or DEFAULT_ORDERING
+    
+#     client = SensbeeClient(base_url)
+    
+#     data = client.get_sensor_data(
+#         sensor_id=sensor_id,
+#         api_key=api_key,
+#         limit=limit,
+#         ordering=ordering,
+#         cols=columns,
+#     )
+    
+#     if len(data) == 0:
+#         raise ValueError(f"NO DATA returned for sensor {sensor_id}")
+    
+#     df = pd.DataFrame(data)
+#     df["created_at"] = pd.to_datetime(df["created_at"])
+#     df = df.sort_values("created_at", ascending=True).set_index("created_at")
+    
+#     logger.info(f"LOADED {len(df)} rows with columns: {df.columns.tolist()}")
+#     return df

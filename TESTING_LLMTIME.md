@@ -1,6 +1,8 @@
 # Testing LLMTime Wrapper
 
-Test forecasting with SensBee API or local JSON data. It tests on default sensor which is Ilmenau Manebach 1 weather station. Forecast temperature for next 24 hours (96 steps at 15-min intervals)
+Note: Testing part doesn't include scheduled forecasting part yet. 
+
+Test forecasting with SensBee API or local JSON data. It tests on default sensor which is Ilmenau's Manebach 1 weather station. Forecast temperature for next 24 hours (96 steps at 15-min intervals)
 
 ## Quick Test
 
@@ -31,7 +33,7 @@ python -m src.models.llmtime_wrapper --source api \
   --sensor-id <UUID> \
   --api-key <KEY> \
   --column temperature \
-  --horizon 12 \
+  --horizon 24 \
   --provider mistral
 ```
 

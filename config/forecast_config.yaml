@@ -1,0 +1,24 @@
+# Forecast configuration for scheduled jobs
+
+# For testing: schedule every N minutes (comment out schedule_hours when using this)
+schedule_minutes: 5
+
+# For production: schedule runs every N hours (simple interval)
+# schedule_hours: 6
+
+# Alternative: schedule at specific hours daily, cron-trigger based
+# schedule_hours: [0, 6, 12, 18]
+
+# Sensors to forecast
+sensors:
+  - source_sensor_id: "8d790e21-f948-4e75-9c47-ea8b1aa75e9d"
+    source_api_key: "f9dc9952-bc02-4f76-841a-a20035e6f574"
+    name: "Manebach_Weather_Station"
+    columns:
+      - name: "temperature"
+        horizon_hours: 24  # 1 day forecast
+        history_days: 7    # 7 days history
+      # - name: "humidity"
+      #   horizon_hours: 24
+      #   history_days: 7
+

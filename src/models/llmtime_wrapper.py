@@ -352,6 +352,7 @@ def forecast_sensor_from_api(
     base_url: Optional[str] = None,
     limit: Optional[int] = None,
 ) -> tuple[np.ndarray, pd.Series]:
+
     # Fetch data from API (uses defaults from sensbee_client)
     series = load_sensor_series_from_api(
         sensor_id=sensor_id,

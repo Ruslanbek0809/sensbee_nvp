@@ -19,7 +19,7 @@ LLM-based time series forecasting for SensBee sensor data.
 ## Quick Start
 
 ```bash
-# From SensBee API (production)
+# From SensBee API (testing)
 python -m src.models.llmtime_wrapper --source api --horizon 24
 
 # From local JSON file (testing)
@@ -30,20 +30,22 @@ python -m src.models.llmtime_wrapper --source local --horizon 24
 
 Add API keys to `.env`:
 ```bash
-GROQ_API_KEY=your-key      # Free: https://console.groq.com/
-# or
 MISTRAL_API_KEY=your-key   # Free: https://console.mistral.ai/
+# or
+GROQ_API_KEY=your-key      # Free: https://console.groq.com/
+# or 
+OPENAI_API_KEY=your-key    # Paid: https://platform.openai.com/
 ```
 
 ## CLI Options
 
 ```
---source {local,api}   Data source (default: local)
+--source {local,api}   Data source (default: api)
 --sensor-id UUID       Sensor UUID for API source
 --api-key KEY          READ API key for API source
 --column NAME          Column to forecast (default: temperature)
 --horizon HOURS        Forecast horizon (default: 24)
---provider NAME        LLM provider: groq, mistral, openai
+--provider NAME        LLM provider: mistral, groq, openai
 --verbose              Enable debug logging
 ```
 
@@ -52,6 +54,7 @@ MISTRAL_API_KEY=your-key   # Free: https://console.mistral.ai/
 ```
 sensbee_nvp/
 ├── src/
+│   ├── config/         # Forecast configurations
 │   ├── data_access/    # SensBee API client + local JSON loader
 │   ├── models/         # LLMTime forecasting wrapper
 │   └── service/        # FastAPI service (WIP)

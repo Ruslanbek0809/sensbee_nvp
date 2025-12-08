@@ -14,7 +14,7 @@ from src.models.llmtime_wrapper import (
 
 
 # Test forecast from SensBee API.
-def test_api(provider: str = "groq", horizon: int = 6):
+def test_api(provider: str = "mistral", horizon: int = 6):
     print("=" * 60)
     print(f"TESTING API source with {provider.upper()}")
     print("=" * 60)
@@ -31,7 +31,7 @@ def test_api(provider: str = "groq", horizon: int = 6):
 
 
 # Test forecast from local JSON file.
-def test_local(provider: str = "groq", horizon: int = 6):
+def test_local(provider: str = "mistral", horizon: int = 6):
     print("=" * 60)
     print(f"TESTING LOCAL source with {provider.upper()}")
     print("=" * 60)
@@ -57,7 +57,7 @@ def main():
     )
     parser.add_argument(
         "--provider",
-        choices=["groq", "mistral", "openai"],
+        choices=["mistral", "groq", "openai"],
         default="mistral",
         help="LLM provider",
     )
@@ -72,8 +72,8 @@ def main():
     
     # Check API key
     key_map = {
-        "groq": "GROQ_API_KEY",
         "mistral": "MISTRAL_API_KEY",
+        "groq": "GROQ_API_KEY",
         "openai": "OPENAI_API_KEY",
     }
     if not os.getenv(key_map[args.provider]):
