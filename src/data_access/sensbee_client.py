@@ -1,21 +1,26 @@
 # HTTP client for fetching sensor data from SensBee API.
 
 import logging
+import os
 from datetime import datetime
 from typing import Optional
 
 import httpx
 import pandas as pd
+from dotenv import load_dotenv
+
+# Load environment variables
+load_dotenv()
 
 logger = logging.getLogger(__name__)
 
 # Default SensBee API parameters
 DEFAULT_BASE_URL = "https://sensbee.smartcity.ilmenau.de:8443"
-DEFAULT_SENSOR_ID = "8d790e21-f948-4e75-9c47-ea8b1aa75e9d"
-DEFAULT_API_KEY = "f9dc9952-bc02-4f76-841a-a20035e6f574"
+DEFAULT_SENSOR_ID = os.getenv("MANEBACH_WEATHER_STATION_SENSOR_UUID")
+DEFAULT_API_KEY = os.getenv("MANEBACH_WEATHER_STATION_MY_API_KEY_READ")
 DEFAULT_LIMIT = 672
 DEFAULT_ORDERING = "DESC"
-DEFAULT_COLUMN_NAME = "temperature"
+DEFAULT_COLUMN_NAME = "humidity"
 
 # Simple HTTP client for SensBee API.
 class SensbeeClient:
