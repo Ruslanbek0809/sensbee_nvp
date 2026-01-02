@@ -12,13 +12,13 @@ schedule_minutes: 5
 # Sensors to forecast
 sensors:
   - source_sensor_id: "8d790e21-f948-4e75-9c47-ea8b1aa75e9d"
-    source_api_key: "f9dc9952-bc02-4f76-841a-a20035e6f574"
+    source_api_key: "6d5ecc8d-1e5a-4c66-be1d-c6fd34958777"
     name: "Manebach_Weather_Station"
     columns:
-      - name: "temperature"
-        horizon_hours: 24  # 1 day forecast
-        history_days: 7    # 7 days history
-      # - name: "humidity"
-      #   horizon_hours: 24
-      #   history_days: 7
+      - name: "humidity"
+        horizon_hours: 24
+        history_days: 7
+      # - name: "temperature"
+      #   horizon_hours: 24  # 1 day forecast
+      #   history_days: 7    # 7 days history
 

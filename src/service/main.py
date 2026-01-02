@@ -41,7 +41,7 @@ async def run_forecast_job_async():
 
 # Starts scheduler on startup, and stops on shutdown.
 @asynccontextmanager
-async def lifespan():
+async def lifespan(app: FastAPI):
     global scheduler
     
     # Starts APScheduler

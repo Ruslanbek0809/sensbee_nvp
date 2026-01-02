@@ -1,6 +1,6 @@
 # Testing LLMTime Wrapper
 
-Note: Testing part doesn't include scheduled forecasting part yet. 
+Note: Testing doesn't include scheduled forecasting part yet. 
 
 Test forecasting with SensBee API or local JSON data. It tests on default sensor which is Ilmenau's Manebach 1 weather station. Forecast temperature for next 24 hours (96 steps at 15-min intervals)
 
