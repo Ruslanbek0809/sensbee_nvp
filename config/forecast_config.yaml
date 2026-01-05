@@ -1,24 +1,24 @@
-# Forecast configuration for scheduled jobs
+# # Forecast configuration for scheduled jobs (Commented out for now)
 
-# For testing: schedule every N minutes (comment out schedule_hours when using this)
-schedule_minutes: 5
+# # For testing: schedule every N minutes (comment out schedule_hours when using this)
+# schedule_minutes: 5
 
-# For production: schedule runs every N hours (simple interval)
-# schedule_hours: 6
+# # For production: schedule runs every N hours (simple interval)
+# # schedule_hours: 6
 
-# Alternative: schedule at specific hours daily, cron-trigger based
-# schedule_hours: [0, 6, 12, 18]
+# # Alternative: schedule at specific hours daily, cron-trigger based
+# # schedule_hours: [0, 6, 12, 18]
 
-# Sensors to forecast
-sensors:
-  - source_sensor_id: "8d790e21-f948-4e75-9c47-ea8b1aa75e9d"
-    source_api_key: "6d5ecc8d-1e5a-4c66-be1d-c6fd34958777"
-    name: "Manebach_Weather_Station"
-    columns:
-      - name: "humidity"
-        horizon_hours: 24
-        history_days: 7
-      # - name: "temperature"
-      #   horizon_hours: 24  # 1 day forecast
-      #   history_days: 7    # 7 days history
+# # Sensors to forecast
+# sensors:
+#   - source_sensor_id: "8d790e21-f948-4e75-9c47-ea8b1aa75e9d"
+#     source_api_key: "6d5ecc8d-1e5a-4c66-be1d-c6fd34958777"
+#     name: "Manebach_Weather_Station"
+#     columns:
+#       - name: "humidity"
+#         horizon_hours: 24
+#         history_days: 7
+#       # - name: "temperature"
+#       #   horizon_hours: 24  # 1 day forecast
+#       #   history_days: 7    # 7 days history
 

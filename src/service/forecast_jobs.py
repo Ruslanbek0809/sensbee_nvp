@@ -10,20 +10,20 @@ from ..models.llmtime_wrapper import llmtime_forecast
 
 logger = logging.getLogger(__name__)
 
-# Loads config
-CONFIG_PATH = os.getenv("FORECAST_CONFIG", "config/forecast_config.yaml")
+# # Loads config (Commented out for now)
+# CONFIG_PATH = os.getenv("FORECAST_CONFIG", "config/forecast_config.yaml")
 
 
-# Loads forecast configuration.
-def load_config() -> dict:
-    with open(CONFIG_PATH, "r") as f:
-        return yaml.safe_load(f)
+# # Loads forecast configuration. (Commented out for now)
+# def load_config() -> dict:
+#     with open(CONFIG_PATH, "r") as f:
+#         return yaml.safe_load(f)
 
 
 # Generates a forecast for a single column.
 def forecast_single_column(
     sensor_id: str,
-    api_key: str,
+    api_key: Optional[str],
     column_name: str,
     horizon_hours: int,
     history_days: int,
@@ -68,7 +68,7 @@ def forecast_single_column(
         freq=f"{sampling_minutes}min"
     )
     
-    # TODO: Storing forecast to SensBee can be implemented here
+    # TODO: Storing forecast to SensBee can be implemented here (Commented out for now)
     
     return {
         "column": column_name,
@@ -84,55 +84,55 @@ def forecast_single_column(
     }
 
 
-# Forecasts all configured columns for a given sensor
-def forecast_sensor_all_columns(sensor_config: dict) -> list[dict]:
-    results = []
+# # Forecasts all configured columns for a given sensor (Commented out for now)
+# def forecast_sensor_all_columns(sensor_config: dict) -> list[dict]:
+#     results = []
     
-    sensor_id = sensor_config["source_sensor_id"]
-    api_key = sensor_config["source_api_key"]
+#     sensor_id = sensor_config["source_sensor_id"]
+#     api_key = sensor_config["source_api_key"]
     
-    for col_config in sensor_config["columns"]:
-        column_name = col_config["name"]
-        horizon_hours = col_config["horizon_hours"]
-        history_days = col_config["history_days"]
+#     for col_config in sensor_config["columns"]:
+#         column_name = col_config["name"]
+#         horizon_hours = col_config["horizon_hours"]
+#         history_days = col_config["history_days"]
         
-        try:
-            result = forecast_single_column(
-                sensor_id=sensor_id,
-                api_key=api_key,
-                column_name=column_name,
-                horizon_hours=horizon_hours,
-                history_days=history_days,
-            )
-            results.append(result)
-        except Exception as e:
-            logger.error(f"FAILED to forecast {column_name}: {e}")
-            results.append({
-                "column": column_name,
-                "error": str(e),
-            })
+#         try:
+#             result = forecast_single_column(
+#                 sensor_id=sensor_id,
+#                 api_key=api_key,
+#                 column_name=column_name,
+#                 horizon_hours=horizon_hours,
+#                 history_days=history_days,
+#             )
+#             results.append(result)
+#         except Exception as e:
+#             logger.error(f"FAILED to forecast {column_name}: {e}")
+#             results.append({
+#                 "column": column_name,
+#                 "error": str(e),
+#             })
     
-    return results
+#     return results
 
 
-# Main job function to run all scheduled forecasts.
-def run_scheduled_forecasts() -> dict:
-    config = load_config()
-    all_results = {}
+# # Main job function to run all scheduled forecasts. (Commented out for now)
+# def run_scheduled_forecasts() -> dict:
+#     config = load_config()
+#     all_results = {}
     
-    logger.info(f"STARTING scheduled forecast run for {len(config['sensors'])} sensors")
+#     logger.info(f"STARTING scheduled forecast run for {len(config['sensors'])} sensors")
     
-    for sensor_config in config["sensors"]:
-        sensor_name = sensor_config.get("name", sensor_config["source_sensor_id"])
-        logger.info(f"PROCESSING sensor: {sensor_name}")
+#     for sensor_config in config["sensors"]:
+#         sensor_name = sensor_config.get("name", sensor_config["source_sensor_id"])
+#         logger.info(f"PROCESSING sensor: {sensor_name}")
         
-        try:
-            results = forecast_sensor_all_columns(sensor_config)
-            all_results[sensor_name] = results
-        except Exception as e:
-            logger.error(f"FAILED to process sensor {sensor_name}: {e}")
-            all_results[sensor_name] = {"error": str(e)}
+#         try:
+#             results = forecast_sensor_all_columns(sensor_config)
+#             all_results[sensor_name] = results
+#         except Exception as e:
+#             logger.error(f"FAILED to process sensor {sensor_name}: {e}")
+#             all_results[sensor_name] = {"error": str(e)}
     
-    logger.info("COMPLETED scheduled forecast run")
-    return all_results
+#     logger.info("COMPLETED scheduled forecast run")
+#     return all_results
 
