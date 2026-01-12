@@ -34,17 +34,29 @@ class ForecastRequest(BaseModel):
         default=24, 
         ge=6, # min 6 hours
         le=168, # max 1 week
-        description="Forecast horizon in hours (1-168)"
+        description="Forecast horizon in hours (6-168)"
     )
     history_days: int = Field(
         default=7, 
         ge=1, # min 1 day
         le=14, # max 14 days
-        description="Days of history to use (1-30)"
+        description="Days of history to use (1-14)"
     )
     provider: str = Field(
         default="mistral", 
-        description="LLM provider: 'mistral', 'groq', or 'openai'"
+        description="LLM provider: 'mistral', 'groq', 'openai', or 'local' (GPU required)"
+    )
+    num_samples: int = Field(
+        default=3,
+        ge=1,
+        le=10,
+        description="Number of LLM samples (1-10). Higher = better quality but slower & more expensive"
+    )
+    temperature: float = Field(
+        default=1.0,
+        ge=0.1,
+        le=1.5,
+        description="LLM sampling temperature (0.1-1.5). Higher = more diversity"
     )
 
 # Here, we define the response body for the forecast endpoint.
@@ -102,6 +114,8 @@ async def generate_forecast(request: ForecastRequest) -> ForecastResponse:
             horizon_hours=request.horizon_hours,
             history_days=request.history_days,
             provider=request.provider,
+            num_samples=request.num_samples,
+            temperature=request.temperature,
         )
         
         # Build response

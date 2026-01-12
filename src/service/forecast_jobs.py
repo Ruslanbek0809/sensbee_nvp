@@ -6,7 +6,7 @@ import pandas as pd
 import yaml
 
 from ..data_access.sensbee_client import load_sensor_series_from_api
-from ..models.llmtime_wrapper import llmtime_forecast
+from ..models.nvp_llms import nvp_llms_forecast
 
 logger = logging.getLogger(__name__)
 
@@ -28,6 +28,8 @@ def forecast_single_column(
     horizon_hours: int,
     history_days: int,
     provider: Optional[str] = None,
+    num_samples: int = 5,
+    temperature: float = 0.9,
 ) -> dict:
     # Calculates limit (history_days * 4 points per hour * 24 hours)
     limit = history_days * 24 * 4
@@ -52,12 +54,14 @@ def forecast_single_column(
     steps_per_hour = 60 / sampling_minutes
     horizon_steps = int(horizon_hours * steps_per_hour)
     
-    # Generates forecast
-    forecast = llmtime_forecast(
+    # Generates forecast using NVP LLMs approach (multiple samples + median)
+    forecast = nvp_llms_forecast(
         series=series,
         horizon=horizon_steps,
         provider=provider,
         column_name=column_name,
+        num_samples=num_samples,
+        temperature=temperature,
     )
     
     # Generates timestamps
