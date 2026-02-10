@@ -1,0 +1,24 @@
+# HPC Cluster requirements for local LLM
+# Use this for cluster-specific setup
+
+# Core ML libraries
+torch>=2.1.0
+transformers>=4.35.0
+accelerate>=0.24.0
+sentencepiece>=0.1.99
+protobuf>=3.20.0
+
+# Quantization support (for efficient inference on A100)
+bitsandbytes>=0.41.0
+
+# Data processing
+pandas>=2.1.0
+numpy>=1.24.0
+
+# Configuration
+pyyaml>=6.0.0
+python-dotenv>=1.0.0
+
+# Optional: monitoring and profiling
+# psutil>=5.9.0
+# py-nvml>=11.5.0
