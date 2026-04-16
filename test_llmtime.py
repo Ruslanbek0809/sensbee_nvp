@@ -1,95 +1,120 @@
-# # Test script for NVP LLMs.
+# Quick test script for NVP LLMs forecasting. Tests the core forecasting pipeline with local JSON data.
 
-# import argparse
-# import os
-# import sys
+import argparse
+import os
+import sys
+from pathlib import Path
 
-# # Add project root to path
-# sys.path.insert(0, os.path.dirname(__file__))
+sys.path.insert(0, os.path.dirname(__file__))
 
-# from src.models.nvp_llms import (
-#     forecast_sensor_from_api,
-#     forecast_sensor_from_local_json,
-# )
+from src.models.nvp_llms import forecast_from_json
+from src.data_access.data_loader import load_sensor_series_from_json
 
 
-# # Test forecast from SensBee API.
-# def test_api(provider: str = "mistral", horizon: int = 6):
-#     print("=" * 60)
-#     print(f"TESTING API source with {provider.upper()}")
-#     print("=" * 60)
+def test_forecast(
+    json_path: str,
+    column: str = "temperature",
+    provider: str = "groq",
+    horizon_hours: int = 6,
+    num_forecasts: int = 5,
+):
+    print("=" * 70)
+    print(f"TESTING NVP-LLM FORECAST")
+    print("=" * 70)
+    print(f"  Data: {json_path}")
+    print(f"  Column: {column}")
+    print(f"  Provider: {provider}")
+    print(f"  Horizon: {horizon_hours} hours")
+    print(f"  Forecasts: {num_forecasts}")
+    print()
     
-#     forecast, series = forecast_sensor_from_api(
-#         horizon_hours=horizon,
-#         provider=provider,
-#     )
+    forecast, series = forecast_from_json(
+        json_path=json_path,
+        column_name=column,
+        horizon_hours=horizon_hours,
+        provider=provider,
+        num_forecasts=num_forecasts,
+    )
     
-#     print(f"Input: {len(series)} points")
-#     print(f"Forecast: {len(forecast)} points")
-#     print(f"Values: {forecast[:6].tolist()}...")
-#     print("API test PASSED!")
+    print(f"Input series: {len(series)} points")
+    print(f"  Range: [{series.min():.2f}, {series.max():.2f}]")
+    print(f"Forecast: {len(forecast)} points")
+    print(f"  Range: [{forecast.min():.2f}, {forecast.max():.2f}]")
+    print(f"  First 6 values: {forecast[:6].tolist()}")
+    print()
+    print("Test PASSED!")
+    
+    return forecast, series
 
 
-# # Test forecast from local JSON file.
-# def test_local(provider: str = "mistral", horizon: int = 6):
-#     print("=" * 60)
-#     print(f"TESTING LOCAL source with {provider.upper()}")
-#     print("=" * 60)
+def main():
+    parser = argparse.ArgumentParser(
+        description="Quick test for NVP-LLM forecasting pipeline"
+    )
+    parser.add_argument(
+        "--json-path",
+        default="data/temp_14day_sensbee_data.json",
+        help="Path to JSON data file",
+    )
+    parser.add_argument(
+        "--column",
+        default="temperature",
+        help="Column to forecast",
+    )
+    parser.add_argument(
+        "--provider",
+        choices=["groq", "openai", "mistral", "local"],
+        default="groq",
+        help="LLM provider",
+    )
+    parser.add_argument(
+        "--horizon",
+        type=int,
+        default=6,
+        help="Forecast horizon in hours",
+    )
+    parser.add_argument(
+        "--num-forecasts",
+        type=int,
+        default=5,
+        help="Number of independent forecasts",
+    )
     
-#     forecast, series = forecast_sensor_from_local_json(
-#         horizon_hours=horizon,
-#         provider=provider,
-#     )
+    args = parser.parse_args()
     
-#     print(f"Input: {len(series)} points")
-#     print(f"Forecast: {len(forecast)} points")
-#     print(f"Values: {forecast[:6].tolist()}...")
-#     print("Local test PASSED!")
+    # Check API key for API providers
+    key_map = {
+        "groq": "GROQ_API_KEY",
+        "openai": "OPENAI_API_KEY",
+        "mistral": "MISTRAL_API_KEY",
+    }
+    if args.provider in key_map:
+        if not os.getenv(key_map[args.provider]):
+            print(f"ERROR: {key_map[args.provider]} not set in environment")
+            print(f"Set it with: export {key_map[args.provider]}='your-key'")
+            sys.exit(1)
+    
+    # Check if data file exists
+    data_path = Path(args.json_path)
+    if not data_path.exists():
+        print(f"ERROR: Data file not found: {data_path}")
+        print("Download sensor data or use a different path.")
+        sys.exit(1)
+    
+    try:
+        test_forecast(
+            json_path=str(data_path),
+            column=args.column,
+            provider=args.provider,
+            horizon_hours=args.horizon,
+            num_forecasts=args.num_forecasts,
+        )
+    except Exception as e:
+        print(f"\nERROR: {e}")
+        import traceback
+        traceback.print_exc()
+        sys.exit(1)
 
 
-# def main():
-#     parser = argparse.ArgumentParser(description="Test NVP LLMs")
-#     parser.add_argument(
-#         "--source",
-#         choices=["api", "local", "both"],
-#         default="api",
-#         help="Data source to test",
-#     )
-#     parser.add_argument(
-#         "--provider",
-#         choices=["mistral", "groq", "openai"],
-#         default="mistral",
-#         help="LLM provider",
-#     )
-#     parser.add_argument(
-#         "--horizon",
-#         type=int,
-#         default=6,
-#         help="Forecast horizon in hours",
-#     )
-    
-#     args = parser.parse_args()
-    
-#     # Check API key
-#     key_map = {
-#         "mistral": "MISTRAL_API_KEY",
-#         "groq": "GROQ_API_KEY",
-#         "openai": "OPENAI_API_KEY",
-#     }
-#     if not os.getenv(key_map[args.provider]):
-#         print(f"ERROR: {key_map[args.provider]} not set in environment")
-#         sys.exit(1)
-    
-#     try:
-#         if args.source in ("api", "both"):
-#             test_api(args.provider, args.horizon)
-#         if args.source in ("local", "both"):
-#             test_local(args.provider, args.horizon)
-#         print("\nAll tests PASSED!")
-#     except Exception as e:
-#         print(f"\nERROR: {e}")
-#         sys.exit(1)
-
-
-# if __name__ == "__main__":
-#     main()
+if __name__ == "__main__":
+    main()

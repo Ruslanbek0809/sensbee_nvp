@@ -2,6 +2,7 @@ import logging
 import os
 from typing import Optional
 
+import numpy as np
 import pandas as pd
 import yaml
 
@@ -9,7 +10,6 @@ from ..data_access.sensbee_client import load_sensor_series_from_api
 from ..models.nvp_llms import nvp_llms_forecast
 
 logger = logging.getLogger(__name__)
-
 # # Loads config (Commented out for now)
 # CONFIG_PATH = os.getenv("FORECAST_CONFIG", "config/forecast_config.yaml")
 
@@ -18,6 +18,46 @@ logger = logging.getLogger(__name__)
 # def load_config() -> dict:
 #     with open(CONFIG_PATH, "r") as f:
 #         return yaml.safe_load(f)
+
+# Remote inference service URL (GPU node).
+# Set via environment variable or defaults to localhost.
+# INFERENCE_SERVICE_URL = os.getenv("INFERENCE_SERVICE_URL", "http://localhost:8001")
+
+
+# Calls remote inference service on GPU node. 
+# def call_remote_inference(
+#     values: list,
+#     horizon: int,
+#     column_name: str,
+#     model: str = "mistral-7b",
+#     num_forecasts: int = 3,
+#     temperature: float = 0.7,
+# ) -> np.ndarray:
+#     import httpx
+    
+#     url = f"{INFERENCE_SERVICE_URL}/predict"
+#     payload = {
+#         "values": values,
+#         "horizon": horizon,
+#         "column_name": column_name,
+#         "model": model,
+#         "num_forecasts": num_forecasts,
+#         "temperature": temperature,
+#     }
+    
+#     logger.info(f"CALLING REMOTE INFERENCE: {url}")
+    
+#     # Long timeout for LLM inference (up to 5 minutes)
+#     response = httpx.post(url, json=payload, timeout=300.0)
+#     response.raise_for_status()
+    
+#     result = response.json()
+#     logger.info(
+#         f"REMOTE INFERENCE COMPLETE: {result['forecast_points']} points "
+#         f"in {result['inference_time_seconds']:.2f}s"
+#     )
+    
+#     return np.array(result["forecast"])
 
 
 # Generates a forecast for a single column.
@@ -28,18 +68,22 @@ def forecast_single_column(
     horizon_hours: int,
     history_days: int,
     provider: Optional[str] = None,
-    num_samples: int = 5,
+    model: Optional[str] = None,
+    num_forecasts: int = 5,
     temperature: float = 0.9,
+    use_normalization: bool = True,
+    include_context: bool = False,
 ) -> dict:
     # Calculates limit (history_days * 4 points per hour * 24 hours)
     limit = history_days * 24 * 4
     
     logger.info(
         f"FORECASTING {column_name} for sensor {sensor_id}, "
-        f"history={history_days}d ({limit} points), horizon={horizon_hours}h"
+        f"history={history_days}d ({limit} points), horizon={horizon_hours}h, "
+        f"provider={provider}, norm={use_normalization}, ctx={include_context}"
     )
     
-    # Loads latest data (DESC to get most recent points, then sorted ASC for time series)
+    # Loads latest data from SensBee API
     series = load_sensor_series_from_api(
         sensor_id=sensor_id,
         api_key=api_key,
@@ -50,21 +94,25 @@ def forecast_single_column(
     if len(series) == 0:
         raise ValueError(f"NO DATA returned for sensor {sensor_id}")
     
+    # Calculates horizon in steps
     sampling_minutes = (series.index[1] - series.index[0]).total_seconds() / 60
     steps_per_hour = 60 / sampling_minutes
     horizon_steps = int(horizon_hours * steps_per_hour)
     
-    # Generates forecast using NVP LLMs approach (multiple samples + median)
+    # Generates forecast using LLM
     forecast = nvp_llms_forecast(
         series=series,
         horizon=horizon_steps,
         provider=provider,
+        model=model,
         column_name=column_name,
-        num_samples=num_samples,
+        num_forecasts=num_forecasts,
         temperature=temperature,
+        use_normalization=use_normalization,
+        include_context=include_context,
     )
     
-    # Generates timestamps
+    # Generates forecast timestamps
     last_ts = series.index[-1]
     forecast_timestamps = pd.date_range(
         start=last_ts + pd.Timedelta(minutes=sampling_minutes),
@@ -72,7 +120,7 @@ def forecast_single_column(
         freq=f"{sampling_minutes}min"
     )
     
-    # TODO: Storing forecast to SensBee can be implemented here (Commented out for now)
+    # TODO for the future: Storing forecast to SensBee can be implemented here
     
     return {
         "column": column_name,

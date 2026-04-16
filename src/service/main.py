@@ -28,35 +28,47 @@ class ForecastRequest(BaseModel):
     )
     column: str = Field(
         ..., 
-        description="Column name to forecast (e.g., 'temperature', 'humidity')"
+        description="Column name to forecast (e.g., 'temperature', 'visitors_total')"
     )
     horizon_hours: int = Field(
         default=24, 
-        ge=6, # min 6 hours
-        le=168, # max 1 week
+        ge=6,
+        le=168,
         description="Forecast horizon in hours (6-168)"
     )
     history_days: int = Field(
         default=7, 
-        ge=1, # min 1 day
-        le=14, # max 14 days
+        ge=1,
+        le=14,
         description="Days of history to use (1-14)"
     )
     provider: str = Field(
-        default="mistral", 
-        description="LLM provider: 'mistral', 'groq', 'openai', or 'local' (GPU required)"
+        default="groq", 
+        description="LLM provider: 'groq', 'openai', 'mistral', or 'local' (GPU required)"
     )
-    num_samples: int = Field(
-        default=3,
+    model: Optional[str] = Field(
+        default=None,
+        description="Model name (optional). For local: 'mistral-7b' or 'llama2-7b'"
+    )
+    num_forecasts: int = Field(
+        default=5,
         ge=1,
-        le=10,
-        description="Number of LLM samples (1-10). Higher = better quality but slower & more expensive"
+        le=20,
+        description="Number of independent forecasts to generate (1-20). Median is returned."
     )
     temperature: float = Field(
-        default=1.0,
+        default=0.9,
         ge=0.1,
         le=1.5,
-        description="LLM sampling temperature (0.1-1.5). Higher = more diversity"
+        description="LLM sampling temperature (0.1-1.5)."
+    )
+    use_normalization: bool = Field(
+        default=True,
+        description="Applies LLMTime-style quantile scaling (α=0.95, β=0.3)."
+    )
+    include_context: bool = Field(
+        default=False,
+        description="Prepends statistical context (min, max, median, trend) to the prompt. Can improve accuracy with raw values"
     )
 
 # Here, we define the response body for the forecast endpoint.
@@ -71,13 +83,15 @@ class ForecastResponse(BaseModel):
     last_data_timestamp: str
     generated_at: str
     provider: str
+    use_normalization: bool = True
+    include_context: bool = False
     cached: bool = False
 
 
 # Here, we define the in-memory cache for the forecast responses.
 forecast_cache: dict[str, ForecastResponse] = {}
 
-# Here, we build the cache key for the forecast responses.
+
 def build_cache_key(sensor_id: str, column: str) -> str:
     return f"{sensor_id}_{column}"
 
@@ -104,8 +118,7 @@ async def generate_forecast(request: ForecastRequest) -> ForecastResponse:
     logger.info(f"/forecast Forecast POST request: sensor={request.sensor_id}, column={request.column}, horizon={request.horizon_hours}h, history={request.history_days}d, provider={request.provider}")
     
     try:
-        # Run forecast in thread pool to avoid blocking the event loop. It runs the forecast_single_column function in a separate thread to avoid blocking the main thread
-        # because forecast_single_column can take a while to complete based on the history and horizon parameters' values entered by the user.
+        # Run forecast in thread pool to avoid blocking the event loop.
         result = await asyncio.to_thread(
             forecast_single_column,
             sensor_id=request.sensor_id,
@@ -114,8 +127,11 @@ async def generate_forecast(request: ForecastRequest) -> ForecastResponse:
             horizon_hours=request.horizon_hours,
             history_days=request.history_days,
             provider=request.provider,
-            num_samples=request.num_samples,
+            model=request.model,
+            num_forecasts=request.num_forecasts,
             temperature=request.temperature,
+            use_normalization=request.use_normalization,
+            include_context=request.include_context,
         )
         
         # Build response
@@ -130,6 +146,8 @@ async def generate_forecast(request: ForecastRequest) -> ForecastResponse:
             last_data_timestamp=result["last_data_timestamp"],
             generated_at=datetime.now().isoformat(),
             provider=request.provider,
+            use_normalization=request.use_normalization,
+            include_context=request.include_context,
             cached=False,
         )
         

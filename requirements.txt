@@ -9,4 +9,5 @@ mistralai>=1.0.0
 groq>=0.4.0
 pyyaml>=6.0.0
 apscheduler>=3.10.0
+matplotlib>=3.7.0
 

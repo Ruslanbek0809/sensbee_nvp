@@ -1,115 +1,69 @@
-# On-demand, input history, and few-shot learning based time series forecasting using LLM APIs.
+# On-demand LLM-based time series forecasting using API and local models. Implements zero-shot forecasting with normalization and optional semantic context.
+#
+# Pipeline:
+#   1. Normalize input using quantile scaler (α=0.95, β=0.3)
+#   2. Serialize to comma-separated string
+#   3. Prompt LLM to continue the sequence
+#   4. Parse, filter, and aggregate N independent forecasts
+#   5. Inverse transform to original scale
+#
+# Four filter rules discard invalid forecasts:
+#   (a) Out-of-bounds values
+#   (b) Constant or near-constant output (≤2 unique values)
+#   (c) Flat output (std < 0.001)
+#   (d) Perfectly linear trends (second derivative < 0.005)
+#
+# If all forecasts are filtered, the system falls back to the last observed value (naive baseline).
 
 import logging
 import os
-import re
 from dataclasses import dataclass
-from typing import Optional, List
+from typing import List, Optional, Tuple
 
 import numpy as np
 import pandas as pd
 from dotenv import load_dotenv
 
+from .serialize import (
+    Scaler,
+    SerializerSettings,
+    ModelFamily,
+    create_scaler,
+    get_serializer_settings,
+    serialize_array,
+    deserialize_string,
+    build_statistical_context,
+)
+
 load_dotenv()
 logger = logging.getLogger(__name__)
 
 
-# Data scaler with transform and inverse transform functions.
-@dataclass
-class Scaler:
-    transform: callable
-    inverse_transform: callable
+# PROMPT TEMPLATES
 
-
-# Create a scaler based on history data. Here, we normalize data to roughly [0, 1] range using quantile-based scaling.
-def create_scaler(history: np.ndarray, alpha: float = 0.95, beta: float = 0.3) -> Scaler:
-    history = history[~np.isnan(history)]
-    
-    if len(history) == 0:
-        return Scaler(transform=lambda x: x, inverse_transform=lambda x: x)
-    
-    min_val = np.min(history)
-    max_val = np.max(history)
-    
-    # Shift to make all values positive, with margin (beta)
-    shift = min_val - beta * (max_val - min_val)
-    
-    # Scale factor based on quantile
-    scale = np.quantile(history - shift, alpha)
-    if scale == 0:
-        scale = 1.0
-    
-    def transform(x: np.ndarray) -> np.ndarray:
-        return (x - shift) / scale
-    
-    def inverse_transform(x: np.ndarray) -> np.ndarray:
-        return x * scale + shift
-    
-    return Scaler(transform=transform, inverse_transform=inverse_transform)
-
-
-# Settings for serialization of numbers.
-@dataclass
-class SerializerSettings:
-    base: int = 10
-    prec: int = 3  # Precision after decimal point
-    signed: bool = True
-    time_sep: str = ", "  # Separator between time steps
-    bit_sep: str = ""  # Separator between digits
-    minus_sign: str = "-"
-
-
-# Serialize array to string format suitable for LLM input.
-def serialize_array(arr: np.ndarray, settings: SerializerSettings) -> str:
-    formatted = []
-    for val in arr:
-        if np.isnan(val):
-            formatted.append("NaN")
-        else:
-            # Format with precision mentioned in settings.
-            if val >= 0:
-                s = f"{val:.{settings.prec}f}"
-            else:
-                s = f"{settings.minus_sign}{abs(val):.{settings.prec}f}"
-            formatted.append(s)
-    
-    return settings.time_sep.join(formatted)
-
-
-# System message. Simpler approach.
-SYSTEM_MESSAGE = ( 
-    "You are a time series pattern continuation engine. "
-    "You MUST output ONLY comma-separated decimal numbers. "
-    "NO text, NO explanations, NO words - ONLY numbers separated by commas. "
-    "Time series have cycles and fluctuations - they do NOT just go up or down linearly."
+# System message for API-based models (kept minimal per LLMTime findings)
+# LLMTime paper: "Unlike PromptCast, we show that LLMs can be used directly as 
+# forecasters without any added text or prompt engineering"
+SYSTEM_MESSAGE_API = (
+    "You continue numerical sequences. Output only numbers separated by commas. "
+    "No explanations, no text, just the numbers."
 )
 
-# Few-shot examples showing NON-LINEAR patterns. Used to break linear bias.
-FEW_SHOT_EXAMPLES = """Example 1 (daily temperature cycle):
-Input: 0.2, 0.3, 0.5, 0.7, 0.8, 0.9, 0.85, 0.7, 0.5, 0.3, 0.2, 0.25, 0.4, 0.6, 0.75, 0.85
-Output: 0.9, 0.8, 0.65, 0.45, 0.3, 0.2, 0.25, 0.4
-
-Example 2 (humidity fluctuation):
-Input: 0.95, 0.92, 0.88, 0.85, 0.82, 0.85, 0.9, 0.93, 0.95, 0.94, 0.9, 0.86
-Output: 0.83, 0.85, 0.88, 0.92, 0.95, 0.94, 0.91, 0.87
-
-"""
-
-# User prefix with few-shot learning
-USER_PREFIX = (
-    FEW_SHOT_EXAMPLES +
-    "Now continue THIS sequence. Output ONLY the predicted numbers, nothing else:\n"
-    "Input: "
+# Enhanced system message for raw/semantic values (70B models)
+SYSTEM_MESSAGE_API_SEMANTIC = (
+    "You forecast sensor data. Output only the predicted numbers separated by commas. "
+    "No explanations or text."
 )
 
 
-
-# Calls Mistral API for text completion with multi-sample support.
-def call_mistral_completion(
+# LLM Provider Functions
+# Calls Mistral the API for text completion.
+def call_mistral_api(
     prompt: str,
     model: Optional[str] = None,
-    num_samples: int = 3,
-    temperature: float = 1.0,
+    num_forecasts: int = 3,
+    temperature: float = 0.9,
+    max_tokens: int = 500,
 ) -> List[str]:
     try:
         from mistralai import Mistral
@@ -121,22 +75,22 @@ def call_mistral_completion(
         model_name = model or os.getenv("MISTRAL_MODEL", "mistral-medium-2505")
         client = Mistral(api_key=api_key)
         
-        logger.debug(f"CALLING Mistral API: {model_name}, samples={num_samples}, temp={temperature}")
+        logger.debug(f"CALLING MISTRAL API: MODEL={model_name}, PATHS={num_forecasts}")
         
-        # Generate multiple samples
         completions = []
-        for i in range(num_samples):
+        for i in range(num_forecasts):
             response = client.chat.complete(
                 model=model_name,
                 messages=[
-                    {"role": "system", "content": SYSTEM_MESSAGE},
+                    {"role": "system", "content": SYSTEM_MESSAGE_API},
                     {"role": "user", "content": prompt},
                 ],
                 temperature=temperature,
-                max_tokens=800,
+                max_tokens=max_tokens,
             )
-            completions.append(response.choices[0].message.content.strip())
-            logger.debug(f"SAMPLE {i+1}/{num_samples}: {completions[-1][:100]}...")
+            content = response.choices[0].message.content.strip()
+            completions.append(content)
+            logger.debug(f"FORECAST {i+1}: {content[:80]}...")
         
         return completions
         
@@ -144,12 +98,14 @@ def call_mistral_completion(
         raise ImportError("mistralai package NOT installed. Run: pip install mistralai")
 
 
-# Calls Groq API for text completion with multi-sample support.
-def call_groq_completion(
+# Calls the Groq API for text completion.
+def call_groq_api(
     prompt: str,
     model: Optional[str] = None,
-    num_samples: int = 3,
-    temperature: float = 1.0,
+    num_forecasts: int = 3,
+    temperature: float = 0.9,
+    max_tokens: int = 500,
+    use_semantic_prompt: bool = False,
 ) -> List[str]:
     try:
         from groq import Groq
@@ -161,21 +117,25 @@ def call_groq_completion(
         model_name = model or os.getenv("GROQ_MODEL", "llama-3.3-70b-versatile")
         client = Groq(api_key=api_key)
         
-        logger.debug(f"CALLING Groq API: {model_name}, samples={num_samples}, temp={temperature}")
+        # Select system message based on use case
+        system_message = SYSTEM_MESSAGE_API_SEMANTIC if use_semantic_prompt else SYSTEM_MESSAGE_API
+        
+        logger.debug(f"CALLING GROQ API: MODEL={model_name}, PATHS={num_forecasts}")
         
         completions = []
-        for i in range(num_samples):
+        for i in range(num_forecasts):
             response = client.chat.completions.create(
                 model=model_name,
                 messages=[
-                    {"role": "system", "content": SYSTEM_MESSAGE},
+                    {"role": "system", "content": system_message},
                     {"role": "user", "content": prompt},
                 ],
                 temperature=temperature,
-                max_tokens=800,
+                max_tokens=max_tokens,
             )
-            completions.append(response.choices[0].message.content.strip())
-            logger.debug(f"SAMPLE {i+1}/{num_samples}: {completions[-1][:100]}...")
+            content = response.choices[0].message.content.strip()
+            completions.append(content)
+            logger.debug(f"FORECAST {i+1}: {content[:80]}...")
         
         return completions
         
@@ -183,44 +143,62 @@ def call_groq_completion(
         raise ImportError("groq package NOT installed. Run: pip install groq")
 
 
-# Calls OpenAI API for text completion with multi-sample support.
-def call_openai_completion(
+# Calls the OpenAI API for text completion.
+# Supports both completion models (gpt-3.5-turbo-instruct) and chat models.
+def call_openai_api(
     prompt: str,
     model: Optional[str] = None,
-    num_samples: int = 3,
-    temperature: float = 1.0,
+    num_forecasts: int = 3,
+    temperature: float = 0.9,
+    max_tokens: int = 500,
 ) -> List[str]:
     import openai
     
-    model_name = model or os.getenv("OPENAI_MODEL", "gpt-4o-mini")
+    model_name = model or os.getenv("OPENAI_MODEL", "gpt-3.5-turbo-instruct") # os.getenv("OPENAI_MODEL", "gpt-4o-mini")
     
-    logger.debug(f"CALLING OpenAI API: {model_name}, samples={num_samples}, temp={temperature}")
+    logger.debug(f"CALLING OPENAI API: MODEL={model_name}, PATHS={num_forecasts}")
     
-    # OpenAI supports n parameter for multiple samples in single call
+    # Use COMPLETION API for instruct models (LLMTime approach - much better!)
+    # Completion models do raw sequence continuation without chat formatting.
+    if "instruct" in model_name.lower():
+        response = openai.completions.create(
+            model=model_name,
+            prompt=prompt,
+            temperature=temperature,
+            max_tokens=max_tokens,
+            n=num_forecasts,
+        )
+        return [choice.text.strip() for choice in response.choices]
+    
+    # Fallback to chat API for chat models
     response = openai.chat.completions.create(
         model=model_name,
         messages=[
-            {"role": "system", "content": SYSTEM_MESSAGE},
+            {"role": "system", "content": SYSTEM_MESSAGE_API},
             {"role": "user", "content": prompt},
         ],
         temperature=temperature,
-        max_tokens=800,
-        n=num_samples,
+        max_tokens=max_tokens,
+        n=num_forecasts,
     )
     
     return [choice.message.content.strip() for choice in response.choices]
 
 
-# Calls local LLM for text completion with TOKEN CONTROL.
-def call_local_llm_completion(
+# Calls local LLM with token control. This is the preferred method as it provides token-level control, ensuring the model outputs only valid numeric sequences.
+def call_local_llm(
     input_str: str,
+    settings: SerializerSettings,
     model: Optional[str] = None,
-    num_samples: int = 3,
-    temperature: float = 1.0,
+    num_forecasts: int = 3,
+    temperature: float = 0.9,
     steps: int = 96,
 ) -> List[str]:
     try:
-        from .local_llm import local_llm_completion, is_local_llm_available
+        from .local_llm import (
+            local_llm_completion,
+            is_local_llm_available,
+        )
         
         if not is_local_llm_available():
             raise ValueError("LOCAL LLM NOT AVAILABLE. LOCAL LLM REQUIRES GPU (CUDA FOR NVIDIA, MPS FOR APPLE SILICON). USE API-BASED PROVIDERS (mistral, groq, openai) INSTEAD.")
@@ -231,38 +209,52 @@ def call_local_llm_completion(
         
         return local_llm_completion(
             input_str=input_str,
+            settings=settings,
             model_name=model_name,
             steps=steps,
-            num_samples=num_samples,
+            num_forecasts=num_forecasts,
             temperature=temperature,
         )
         
     except ImportError as e:
         raise ImportError(
-            f"LOCAL LLM REQUIRES: pip install torch transformers accelerate\n"
-            f"ERROR: {e}"
+            f"Local LLM requires: pip install torch transformers accelerate\n"
+            f"Error: {e}"
         )
 
 
-# Unified LLM completion call with multi-sample support.
+# Unified LLM completion interface.
 def call_llm_completion(
     prompt: str,
+    settings: SerializerSettings,
     provider: Optional[str] = None,
     model: Optional[str] = None,
-    num_samples: int = 3,
-    temperature: float = 1.0,
+    num_forecasts: int = 3,
+    temperature: float = 0.9,
     steps: int = 96,
+    use_semantic_prompt: bool = False,
 ) -> List[str]:
     provider = (provider or os.getenv("LLM_PROVIDER", "mistral")).lower()
     
+    # With prec=3 and integer mode, each value is ~3-4 digits + comma ≈ 5 tokens.
+    avg_tokens_per_step = 5 if settings.use_integers else 7
+    max_tokens = int(avg_tokens_per_step * steps * 1.3)
+    
     if provider == "local":
-        return call_local_llm_completion(prompt, model, num_samples, temperature, steps)
+        return call_local_llm(
+            input_str=prompt,
+            settings=settings,
+            model=model,
+            num_forecasts=num_forecasts,
+            temperature=temperature,
+            steps=steps,
+        )
     elif provider == "mistral":
-        return call_mistral_completion(prompt, model, num_samples, temperature)
+        return call_mistral_api(prompt, model, num_forecasts, temperature, max_tokens)
     elif provider == "groq":
-        return call_groq_completion(prompt, model, num_samples, temperature)
+        return call_groq_api(prompt, model, num_forecasts, temperature, max_tokens, use_semantic_prompt)
     elif provider == "openai":
-        return call_openai_completion(prompt, model, num_samples, temperature)
+        return call_openai_api(prompt, model, num_forecasts, temperature, max_tokens)
     else:
         raise ValueError(
             f"UNKNOWN PROVIDER: {provider}. "
@@ -270,39 +262,46 @@ def call_llm_completion(
         )
 
 
-# Parses LLM response to extract numeric values.
-def parse_forecast_response(response: str, horizon: int) -> Optional[np.ndarray]:
-    # Extracts all numbers (including negative and decimals)
-    pattern = r"-?\d+\.?\d*"
-    matches = re.findall(pattern, response)
-    
-    if len(matches) == 0:
-        logger.warning(f"NO NUMBERS FOUND in response: {response[:100]}")
-        return None
-    
-    try:
-        values = [float(m) for m in matches]
-    except ValueError:
-        logger.warning(f"FAILED TO PARSE NUMBERS FROM RESPONSE")
-        return None
-    
-    # Handle length mismatch
-    if len(values) < horizon:
-        # Pads with last value
-        values.extend([values[-1]] * (horizon - len(values)))
-    
-    return np.array(values[:horizon])
+# Main Forecasting Functions
+
+# Builds the complete prompt for forecasting.
+# LLMTime approach: for base/local models, send ONLY the serialized numbers
+# (the trailing comma signals the model to continue generating).
+# For API chat models, the system message already constrains the output;
+# the user message should contain minimal instruction plus the sequence.
+def build_forecast_prompt(
+    serialized_input: str,
+    settings: SerializerSettings,
+    context: Optional[str] = None,
+    is_local: bool = False,
+    horizon: Optional[int] = None,
+) -> str:
+    if is_local:
+        # Local base models: raw sequence only (LLMTime default).
+        # The trailing comma after the last value signals continuation.
+        return serialized_input
+
+    # API chat models: minimal framing to keep the model in numeric mode.
+    parts = []
+
+    if context:
+        parts.append(context)
+        parts.append("")
+
+    parts.append(serialized_input)
+
+    return "\n".join(parts)
 
 
-# Aggregates multiple forecast samples.
+# Aggregates multiple forecast samples into a single prediction.
 def aggregate_samples(
     samples: List[np.ndarray],
-    method: str = "median"
+    method: str = "median",
 ) -> np.ndarray:
-    if len(samples) == 0:
+    if not samples:
         raise ValueError("NO VALID SAMPLES TO AGGREGATE")
     
-    # Stack samples into matrix
+    # Stacks samples into matrix
     sample_matrix = np.stack(samples, axis=0)
     
     if method == "median":
@@ -313,177 +312,279 @@ def aggregate_samples(
         raise ValueError(f"UNKNOWN AGGREGATION METHOD: {method}")
 
 
-# Generates forecast using NVP LLMs. Main function.
+# Generates forecast using LLM with hybrid approach.
 def nvp_llms_forecast(
     series: pd.Series,
     horizon: int,
     provider: Optional[str] = None,
     model: Optional[str] = None,
     column_name: str = "value",
-    num_samples: int = 3,
-    temperature: float = 1.0,
+    num_forecasts: int = 5,
+    temperature: float = 0.9,
+    use_normalization: bool = True,
+    include_context: bool = False,
+    alpha: float = 0.95,
+    beta: float = 0.3,
 ) -> np.ndarray:
     if len(series) == 0:
         raise ValueError("EMPTY SERIES")
     
-    # Converts to numeric, coercing errors to NaN, then drops NaN values
-    numeric_series = pd.to_numeric(series, errors='coerce')
+    # Converts to numeric and cleans values
+    numeric_series = pd.to_numeric(series, errors="coerce")
     numeric_series = numeric_series.dropna()
     
     if len(numeric_series) == 0:
-        raise ValueError("ALL VALUES ARE NaN after conversion")
+        raise ValueError("ALL VALUES ARE NaN AFTER CONVERSION")
     
     values = numeric_series.values.astype(float)
-    
-    # Logs original statistics before normalization
-    original_min = float(np.min(values))
+    original_min = float(np.min(values)) 
     original_max = float(np.max(values))
-    logger.info(f"INPUT DATA: {len(values)} VALID POINTS, RANGE [{original_min:.2f}, {original_max:.2f}]")
     
-    # Step 1: Creates scaler from history
-    scaler = create_scaler(values)
-    
-    # Step 2: Normalizes input data
-    normalized_values = scaler.transform(values)
-    
-    # Logs statistics
     logger.info(
-        f"FORECASTING {column_name}: NORMALIZED RANGE [{normalized_values.min():.3f}, {normalized_values.max():.3f}]"
+        f"INPUT: {len(values)} POINTS, RANGE [{original_min:.2f}, {original_max:.2f}]"
     )
     
-    # Step 3: Serializes to string
-    # Limit input length to avoid token limits (last ~200 points)
-    # max_input_points = 200
-    # if len(normalized_values) > max_input_points:
-    #     normalized_values = normalized_values[-max_input_points:]
-    #     logger.info(f"Truncated input to last {max_input_points} points")
+    # Determines provider and gets appropriate settings
+    provider = (provider or os.getenv("LLM_PROVIDER", "mistral")).lower()
+    is_local = provider == "local"
     
-    settings = SerializerSettings(prec=3, time_sep=", ")
-    input_str = serialize_array(normalized_values, settings)
+    settings = get_serializer_settings(
+        model_name=model,
+        provider=provider,
+        is_local=is_local,
+    )
     
-    # Build prompt
-    prompt = USER_PREFIX + input_str + settings.time_sep
+    # Step 1: Creates scaler and normalizes values
+    if use_normalization:
+        scaler = create_scaler(values, alpha=alpha, beta=beta)
+        normalized_values = scaler.transform(values)
+        logger.info(
+            f"NORMALIZED RANGE: [{normalized_values.min():.3f}, {normalized_values.max():.3f}]"
+        )
+    else:
+        scaler = Scaler(
+            original_min=original_min,
+            original_max=original_max,
+        )
+        normalized_values = values
     
-    logger.debug(f"PROMPT LENGTH: {len(prompt)} CHARS, INPUT POINTS: {len(normalized_values)}")
+    # Step 2: Serializes input
+    serialized_input = serialize_array(normalized_values, settings)
     
-    # Step 4: Generates multiple samples from LLM
+    logger.debug(f"SERIALIZED INPUT (FIRST 100 CHARS): {serialized_input[:100]}...")
+    
+    # Step 3: Builds context and prompt
+    context = None
+    if include_context:
+        context = build_statistical_context(
+            values=normalized_values,
+            column_name=column_name,
+            horizon=horizon,
+            scaler=scaler if use_normalization else None,
+            include_raw_stats=use_normalization,
+        )
+    
+    prompt = build_forecast_prompt(
+        serialized_input=serialized_input,
+        settings=settings,
+        context=context,
+        is_local=is_local,
+        horizon=horizon,
+    )
+    
+    logger.debug(f"PROMPT LENGTH: {len(prompt)} CHARS")
+    
+    # Step 4: Generates completions
+    # Use semantic prompt for API models when using raw values (semantic info preserved)
+    use_semantic_prompt = (not is_local) and (not use_normalization)
+    
     completions = call_llm_completion(
         prompt=prompt,
+        settings=settings,
         provider=provider,
         model=model,
-        num_samples=num_samples,
+        num_forecasts=num_forecasts,
         temperature=temperature,
-        steps=horizon,  # Pass horizon for local LLM token calculation
+        steps=horizon,
+        use_semantic_prompt=use_semantic_prompt,
     )
     
-    # Step 5: Parses each response
+    # Step 5: Parses completions with outlier filtering
     valid_samples = []
+    
+    # Determines bounds based on normalization usage
+    if use_normalization:
+        # For normalized values: should be roughly in [0, 2] range after normalization.
+        # LLMTime uses quantile scaling where α-percentile = 1.0, so values can exceed 1.
+        # Widen bounds to avoid filtering valid extrapolations.
+        min_bound = -2.0
+        max_bound = 5.0
+        bound_description = "normalized"
+    else:
+        # For raw values: use input data range with reasonable buffer
+        # Allow 2x the input range to account for extrapolation
+        input_range = original_max - original_min
+        buffer = max(input_range * 2.0, 10.0)  # At least 10 units buffer
+        min_bound = original_min - buffer
+        max_bound = original_max + buffer
+        bound_description = f"raw (input range: [{original_min:.2f}, {original_max:.2f}])"
+    
+    logger.debug(
+        f"OUTLIER FILTERING: BOUNDS=[{min_bound:.2f}, {max_bound:.2f}] ({bound_description})"
+    )
+    
     for i, completion in enumerate(completions):
-        # Logs first 200 chars of each completion for debugging
-        logger.info(f"SAMPLE {i+1} RAW RESPONSE: {completion[:200]}...")
-        
-        parsed = parse_forecast_response(completion, horizon)
-        if parsed is not None:
-            valid_samples.append(parsed)
-            # Checks if sample is linear (for debugging)
-            diffs = np.diff(parsed)
-            is_linear = np.std(diffs) < 0.01 * np.abs(np.mean(diffs)) if np.mean(diffs) != 0 else True
-            logger.info(f"SAMPLE {i+1}: RANGE [{parsed.min():.3f}, {parsed.max():.3f}], LINEAR={is_linear}")
-        else:
-            logger.warning(f"SAMPLE {i+1}: INVALID (PARSING FAILED)")
+        logger.info(f"FORECAST {i+1} RAW: {completion[:250]}...")
+
+        parsed = deserialize_string(
+            text=completion,
+            settings=settings,
+            expected_length=horizon,
+        )
+
+        if parsed is None or len(parsed) == 0:
+            logger.warning(f"FORECAST {i+1}: PARSING FAILED")
+            continue
+
+        # --- Filter (a): Out-of-bounds values ---
+        if parsed.min() < min_bound or parsed.max() > max_bound:
+            logger.warning(
+                f"FORECAST {i+1}: FILTERED (a) out-of-bounds "
+                f"[{parsed.min():.3f}, {parsed.max():.3f}] outside [{min_bound:.2f}, {max_bound:.2f}]"
+            )
+            continue
+
+        # --- Filter (b): Constant or near-constant output (≤2 unique values) ---
+        if len(np.unique(np.round(parsed, 3))) <= 2:
+            logger.warning(f"FORECAST {i+1}: FILTERED (b) constant or near-constant (≤2 unique values)")
+            continue
+
+        # --- Filter (c): Flat output (std < 0.001) ---
+        if float(np.std(parsed)) < 0.001:
+            logger.warning(f"FORECAST {i+1}: FILTERED (c) flat output (std < 0.001)")
+            continue
+
+        # --- Filter (d): Perfectly linear trends (second derivative < 0.005) ---
+        if len(parsed) > 4:
+            second_diff = np.diff(parsed, 2)
+            if np.all(np.abs(second_diff) < 0.005):
+                logger.warning(f"FORECAST {i+1}: FILTERED (d) perfectly linear (2nd deriv < 0.005)")
+                continue
+
+        valid_samples.append(parsed)
+        logger.info(
+            f"FORECAST {i+1}: PARSED {len(parsed)} VALUES, "
+            f"RANGE [{parsed.min():.3f}, {parsed.max():.3f}] ✓"
+        )
     
-    if len(valid_samples) == 0:
-        raise ValueError("ALL LLM SAMPLES FAILED TO PARSE")
+    if not valid_samples:
+        # Fallback: if all samples filtered, use last value extrapolation
+        logger.warning("ALL SAMPLES FILTERED. USING LAST VALUE FALLBACK.")
+        return np.full(horizon, values[-1])
     
-    logger.info(f"VALID SAMPLES: {len(valid_samples)}/{num_samples}")
+    logger.info(f"VALID FORECASTS AFTER FILTERING: {len(valid_samples)}/{num_forecasts}")
     
-    # Step 6: Takes MEDIAN of valid samples
+    # Step 6: Aggregates samples
     normalized_forecast = aggregate_samples(valid_samples, method="median")
     
-    # Step 7: Denormalizes back to original scale
-    forecast = scaler.inverse_transform(normalized_forecast)
+    # Step 7: Inverses transform
+    if use_normalization:
+        forecast = scaler.inverse_transform(normalized_forecast)
+    else:
+        forecast = normalized_forecast
     
+    # Post-processing: clip visitor-type columns to non-negative values.
+    # Visitor counts cannot be negative; the scaler can produce sub-zero values
+    # when the model generates values below the normalized minimum.
+    _NON_NEGATIVE_COLUMNS = {"visitors_total", "visitor_change", "visitors", "count"}
+    if column_name.lower() in _NON_NEGATIVE_COLUMNS:
+        forecast = np.clip(forecast, 0, None)
+
     logger.info(
-        f"GENERATED FORECAST: {len(forecast)} POINTS, "
-        f"RANGE [{forecast.min():.2f}, {forecast.max():.2f}]"
+        f"FORECAST: {len(forecast)} POINTS, RANGE [{forecast.min():.2f}, {forecast.max():.2f}]"
     )
-    
+
     return forecast
 
 
-
-# # Fetches sensor data from SensBee API and generates forecast.
-# def forecast_sensor_from_api(
-#     sensor_id: Optional[str] = None,
-#     api_key: Optional[str] = None,
-#     column_name: Optional[str] = None,
-#     horizon_hours: int = 24,
-#     provider: Optional[str] = None,
-#     model: Optional[str] = None,
-#     base_url: Optional[str] = None,
-#     limit: Optional[int] = None,
-#     num_samples: int = 5,
-#     temperature: float = 0.9,
-# ) -> tuple[np.ndarray, pd.Series]:
-#     series = load_sensor_series_from_api(
-#         sensor_id=sensor_id,
-#         api_key=api_key,
-#         column_name=column_name,
-#         base_url=base_url,
-#         limit=limit,
-#     )
+# Function to forecast from local JSON file.
+def forecast_from_json(
+    json_path: str,
+    column_name: str = "temperature",
+    horizon_hours: int = 24,
+    provider: Optional[str] = None,
+    model: Optional[str] = None,
+    num_forecasts: int = 5,
+    temperature: float = 0.9,
+) -> Tuple[np.ndarray, pd.Series]:
+    from ..data_access.data_loader import load_sensor_series_from_json
     
-#     if len(series) < 2:
-#         raise ValueError(f"NOT ENOUGH DATA POINTS: {len(series)}")
+    series = load_sensor_series_from_json(
+        path=json_path,
+        column_name=column_name,
+    )
     
-#     # Calculates horizon in steps
-#     sampling_minutes = (series.index[1] - series.index[0]).total_seconds() / 60
-#     horizon_steps = int(horizon_hours * (60 / sampling_minutes))
+    if len(series) < 2:
+        raise ValueError(f"NOT ENOUGH DATA POINTS: {len(series)}")
     
-#     from ..data_access.sensbee_client import DEFAULT_COLUMN_NAME
-#     actual_column = column_name or DEFAULT_COLUMN_NAME
+    # Calculate horizon in steps
+    if isinstance(series.index[0], pd.Timestamp) and len(series) > 1:
+        sampling_minutes = (series.index[1] - series.index[0]).total_seconds() / 60
+        horizon_steps = int(horizon_hours * (60 / sampling_minutes))
+    else:
+        horizon_steps = horizon_hours
     
-#     forecast = nvp_llms_forecast(
-#         series=series,
-#         horizon=horizon_steps,
-#         provider=provider,
-#         model=model,
-#         column_name=actual_column,
-#         num_samples=num_samples,
-#         temperature=temperature,
-#     )
+    forecast = nvp_llms_forecast(
+        series=series,
+        horizon=horizon_steps,
+        provider=provider,
+        model=model,
+        column_name=column_name,
+        num_forecasts=num_forecasts,
+        temperature=temperature,
+    )
     
-#     return forecast, series
+    return forecast, series
 
 
-# # Loads sensor data from local JSON and generates forecast.
-# def forecast_sensor_from_local_json(
-#     column_name: Optional[str] = None,
-#     horizon_hours: int = 24,
-#     provider: Optional[str] = None,
-#     model: Optional[str] = None,
-#     num_samples: int = 5,
-#     temperature: float = 0.9,
-# ) -> tuple[np.ndarray, pd.Series]:
-#     series = load_sensor_series_from_json(column_name=column_name)
+# Function to forecast from SensBee API.
+def forecast_from_api(
+    sensor_id: str,
+    column_name: str = "temperature",
+    horizon_hours: int = 24,
+    provider: Optional[str] = None,
+    model: Optional[str] = None,
+    api_key: Optional[str] = None,
+    base_url: Optional[str] = None,
+    limit: Optional[int] = None,
+    num_forecasts: int = 5,
+    temperature: float = 0.9,
+) -> Tuple[np.ndarray, pd.Series]:
+    from ..data_access.sensbee_client import load_sensor_series_from_api
     
-#     if len(series) < 2:
-#         raise ValueError(f"NOT ENOUGH DATA POINTS: {len(series)}")
+    series = load_sensor_series_from_api(
+        sensor_id=sensor_id,
+        api_key=api_key,
+        column_name=column_name,
+        base_url=base_url,
+        limit=limit,
+    )
     
-#     sampling_minutes = (series.index[1] - series.index[0]).total_seconds() / 60
-#     horizon_steps = int(horizon_hours * (60 / sampling_minutes))
+    if len(series) < 2:
+        raise ValueError(f"Not enough data points: {len(series)}")
     
-#     from ..data_access.data_loader import DEFAULT_COLUMN_NAME
-#     actual_column = column_name or DEFAULT_COLUMN_NAME
+    # Calculate horizon in steps
+    sampling_minutes = (series.index[1] - series.index[0]).total_seconds() / 60
+    horizon_steps = int(horizon_hours * (60 / sampling_minutes))
     
-#     forecast = nvp_llms_forecast(
-#         series=series,
-#         horizon=horizon_steps,
-#         provider=provider,
-#         model=model,
-#         column_name=actual_column,
-#         num_samples=num_samples,
-#         temperature=temperature,
-#     )
+    forecast = nvp_llms_forecast(
+        series=series,
+        horizon=horizon_steps,
+        provider=provider,
+        model=model,
+        column_name=column_name,
+        num_forecasts=num_forecasts,
+        temperature=temperature,
+    )
     
-#     return forecast, series
+    return forecast, series

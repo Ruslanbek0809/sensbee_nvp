@@ -30,6 +30,22 @@ cp -r "$LOCAL_DIR/src" "$TEMP_DIR/"
 cp -r "$LOCAL_DIR/hpc_setup" "$TEMP_DIR/"
 cp "$LOCAL_DIR/requirements.txt" "$TEMP_DIR/" 2>/dev/null || true
 
+# Copy data directory (required for benchmark: temp_* and eishalle_* JSON files)
+if [ -d "$LOCAL_DIR/data" ]; then
+    mkdir -p "$TEMP_DIR/data"
+    if compgen -G "$LOCAL_DIR/data/temp_*.json" > /dev/null 2>&1; then
+        cp "$LOCAL_DIR/data"/temp_*.json "$TEMP_DIR/data/"
+    fi
+    if compgen -G "$LOCAL_DIR/data/eishalle_*.json" > /dev/null 2>&1; then
+        cp "$LOCAL_DIR/data"/eishalle_*.json "$TEMP_DIR/data/"
+    fi
+    if [ -n "$(ls -A "$TEMP_DIR/data" 2>/dev/null)" ]; then
+        echo "Included data/*.json for benchmark."
+    else
+        echo "Note: data/ exists but no temp_*.json or eishalle_*.json found — copy them manually for test_benchmark.py."
+    fi
+fi
+
 # Create remote directory
 echo ""
 echo "Creating remote directory structure..."
