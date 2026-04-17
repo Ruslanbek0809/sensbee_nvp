@@ -1,22 +1,13 @@
 # HPC Cluster README
 
-Nodes: makalu48 (setup. Has internet), makalu86 (GPU node. No internet)
+## Architecture
 
-<!-- ## Architecture
+- **Login node (makalu48):** Has internet access. Downloads model weights from Hugging Face into shared `/scratch` storage.
+- **GPU node (makalu86):** 4× NVIDIA A100 (40 GB VRAM each), no internet access. Sets `HF_HUB_OFFLINE=1` so transformers loads weights from disk.
 
-```
-┌─────────────────────────────────────────────────────────────────┐
-│ makalu48 (Login Node)            makalu86 (GPU Node)            │
-│ ✓ Internet access                ✓ 4x NVIDIA A100 (160GB)       │
-│ ✓ Fetch from SensBee API         ✗ No internet                  │
-│ ✓ Run main.py service            ✓ Run inference_service.py     │
-│                                                                  │
-│  User Request ──► main.py ──────► inference_service.py          │
-│                   (fetch data)    (run local LLM)               │
-│                       ◄──────────────────┘                      │
-│                   (return forecast)                              │
-└─────────────────────────────────────────────────────────────────┘
-``` -->
+Both nodes share the `/scratch` filesystem, so weights downloaded once on the login node are available on the GPU node without copying.
+
+A 7B model requires approximately 14 GB in `float16` and fits within one A100. The benchmark uses multi-GPU inference: a VRAM check (`_get_usable_gpus`) selects GPUs with at least 15 GiB free, and forecasts are distributed across available GPUs using `ThreadPoolExecutor`.
 
 ### Deployment steps
 
@@ -35,6 +26,16 @@ From cd /scratch/ruha6285/sensbee_nvp or cd /scratch/$USER/sensbee_nvp, run this
 source /scratch/$USER/sensbee_nvp/env_setup.sh
 cd /scratch/ruha6285/sensbee_nvp
 python hpc_setup/download_models.py --all # or --model mistral-7b
+
+# Gated models (Llama 2): re-authenticate on the cluster
+# Your Hugging Face login on your laptop does not apply on the cluster. Do one of the following on the login node:
+#   Option A — interactive login (stores token in ~/.cache/huggingface/token on the cluster):
+#     pip install -q huggingface_hub && huggingface-cli login
+#     Then paste your token from https://huggingface.co/settings/tokens (and accept the Llama 2 license on HF if needed).
+#   Option B — use a token in the environment (no interactive step):
+#     export HF_TOKEN=hf_xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx
+#     python hpc_setup/download_models.py --model llama2-7b
+# Do not commit HF_TOKEN to git.
 
 # Test on GPU node
 ssh -X makalu86 # after this you can also run nvidia-smi to verify GPU access
@@ -59,9 +60,9 @@ python hpc_setup/test_forecast.py --source api --sensor-id <UUID> --column tempe
 ```bash
 python3 hpc_setup/run_custom_forecast.py \
   --source api \
-  --sensor-id "8d790e21-f948-4e75-9c47-ea8b1aa75e9d" \
-  --api-key "6d5ecc8d-1e5a-4c66-be1d-c6fd34958777" \
-  --column humidity \
+  --sensor-id "YOUR_SENSOR_UUID" \
+  --api-key "YOUR_SENSBEE_READ_API_KEY" \
+  --column temperature \
   --model mistral-7b \
   --horizon 48 \
   --history-days 7 \
@@ -86,52 +87,66 @@ du -sh /scratch/ruha6285/.cache/huggingface/
 rm -rf /scratch/ruha6285/.cache/huggingface/hub/
 ```
 
+## Running the Benchmark
 
-<!-- ## Production Deployment
+The benchmark script (`run_benchmark.py`) runs a systematic evaluation across sensors, window sizes, and ablation configurations:
 
-### Option 1: Two-Node Service (Recommended)
-
-**On makalu86 (GPU node) - Start inference service:**
 ```bash
+# On GPU node (makalu86)
+cd /scratch/ruha6285/sensbee_nvp
 source /scratch/$USER/sensbee_nvp/env_setup.sh
 export HF_HUB_OFFLINE=1
-uvicorn src.service.inference_service:app --host 0.0.0.0 --port 8001
+
+# Full ablation study (8 configs × 3 windows × 2 sensors = 48 tests)
+python hpc_setup/run_benchmark.py --provider local --model llama2-7b --mode ablation
+
+# Quick smoke test (1 window, 1 sensor)
+python hpc_setup/run_benchmark.py --provider local --model mistral-7b --quick
+
+# Temperature only
+python hpc_setup/run_benchmark.py --provider local --model llama2-7b --sensor temperature
+
+# Groq API benchmark (requires GROQ_API_KEY)
+export GROQ_API_KEY='...'
+python hpc_setup/run_benchmark.py --provider groq --mode ablation
 ```
 
-**On makalu48 (login node) - Start main service:**
+Results are saved to `results/report_benchmark_<timestamp>.json` with figures in `results/figures/` and LaTeX tables in `results/tables/`.
+
+### Benchmark data (run_benchmark.py)
+
+The benchmark expects these files under `data/`:
+
+- **Temperature:** `data/temp_14day_sensbee_data.json`
+- **Visitors:** `data/eishalle_14day_sensbee_data.json`
+
+`./hpc_setup/deploy_to_cluster.sh` copies `data/temp_*.json` and `data/eishalle_*.json` from your machine if present. If you see **"Data file NOT FOUND: .../data/temp_1..."** (path truncated), the full path is `.../data/temp_14day_sensbee_data.json` — either redeploy (so data/ is included) or copy data manually:
+
 ```bash
-source /scratch/$USER/sensbee_nvp/env_setup.sh
-export INFERENCE_SERVICE_URL=http://makalu86:8001
-export SENSBEE_API_KEY="your-api-key"
-uvicorn src.service.main:app --host 0.0.0.0 --port 8000
+rsync -avz data/temp_14day_sensbee_data.json data/eishalle_14day_sensbee_data.json \
+  ruha6285@cslogin.tu-ilmenau.de:/scratch/ruha6285/sensbee_nvp/data/
 ```
 
-**User makes request to makalu48:**
-```bash
-curl -X POST http://makalu48:8000/forecast \
-    -H "Content-Type: application/json" \
-    -d '{
-        "sensor_id": "8d790e21-f948-4e75-9c47-ea8b1aa75e9d",
-        "column": "temperature",
-        "horizon_hours": 24,
-        "provider": "remote"
-    }'
-``` -->
+### Clear cache, re-download models, and remove benchmark results
 
-<!-- ### Option 2: Batch Processing
+**On the cluster** (login node for cache/download; any node for results):
 
-For one-off forecasts without running services:
+1. **Clear HuggingFace cache** (so models are re-downloaded next time):
+   ```bash
+   rm -rf /scratch/ruha6285/sensbee_nvp/hf_cache/*
+   # If you also use the default cache location:
+   # rm -rf /scratch/ruha6285/.cache/huggingface/hub/
+   ```
 
-```bash
-# On makalu48 (fetch data)
-python hpc_setup/production_forecast.py --fetch-only \
-    --sensor-id 8d790e21-f948-4e75-9c47-ea8b1aa75e9d \
-    --column temperature \
-    --output-data /scratch/$USER/sensbee_nvp/data/request.json
+2. **Re-download all models** (run on login node with internet, after clearing cache):
+   ```bash
+   cd /scratch/ruha6285/sensbee_nvp
+   source /scratch/$USER/sensbee_nvp/env_setup.sh
+   python hpc_setup/download_models.py --all
+   ```
 
-# On makalu86 (generate forecast)
-python hpc_setup/production_forecast.py --from-file \
-    --input-data /scratch/$USER/sensbee_nvp/data/request.json \
-    --model mistral-7b
-``` -->
-
+3. **Remove all benchmark result JSONs** (on cluster):
+   ```bash
+   rm -f /scratch/ruha6285/sensbee_nvp/results/benchmark_*.json
+   ```
+   To list before deleting: `ls /scratch/ruha6285/sensbee_nvp/results/benchmark_*.json`
