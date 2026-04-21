@@ -1,3 +1,4 @@
+# Open-sourced recently
 # SensBee NVP (next-value prediction) service
 
 On-demand LLM-based time series forecasting service for SensBee sensor data.
