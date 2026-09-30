@@ -74,21 +74,21 @@ def forecast_single_column(
     use_normalization: bool = True,
     include_context: bool = False,
 ) -> dict:
-    # Calculates limit (history_days * 4 points per hour * 24 hours)
-    limit = history_days * 24 * 4
-    
+    # History window in hours; the SensBee client derives the API limit from it
+    window_hours = history_days * 24
+
     logger.info(
         f"FORECASTING {column_name} for sensor {sensor_id}, "
-        f"history={history_days}d ({limit} points), horizon={horizon_hours}h, "
+        f"history={history_days}d ({window_hours}h), horizon={horizon_hours}h, "
         f"provider={provider}, norm={use_normalization}, ctx={include_context}"
     )
-    
+
     # Loads latest data from SensBee API
     series = load_sensor_series_from_api(
         sensor_id=sensor_id,
         api_key=api_key,
         column_name=column_name,
-        limit=limit,
+        window_hours=window_hours,
     )
     
     if len(series) == 0:

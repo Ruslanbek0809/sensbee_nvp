@@ -1,0 +1,14 @@
+# Versions the research-project results were produced with (read from the RP venv, 2026-09-29).
+# Keeps the LLMTime baseline reproducible: mistralai 3.x removed `from mistralai import Mistral`,
+# and pandas 3.x is outside the range autogluon.timeseries accepts (<2.4).
+fastapi==0.121.2
+groq==0.35.0
+httpx==0.28.1
+matplotlib==3.10.8
+mistralai==1.9.11
+numpy==2.3.5
+openai==2.8.1
+pandas==2.3.3
+python-dotenv==1.2.1
+pyyaml==6.0.3
+uvicorn==0.38.0

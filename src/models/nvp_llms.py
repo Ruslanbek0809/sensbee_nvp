@@ -556,18 +556,18 @@ def forecast_from_api(
     model: Optional[str] = None,
     api_key: Optional[str] = None,
     base_url: Optional[str] = None,
-    limit: Optional[int] = None,
+    history_days: int = 7,
     num_forecasts: int = 5,
     temperature: float = 0.9,
 ) -> Tuple[np.ndarray, pd.Series]:
     from ..data_access.sensbee_client import load_sensor_series_from_api
-    
+
     series = load_sensor_series_from_api(
         sensor_id=sensor_id,
         api_key=api_key,
         column_name=column_name,
+        window_hours=history_days * 24,
         base_url=base_url,
-        limit=limit,
     )
     
     if len(series) < 2:
