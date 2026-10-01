@@ -10,7 +10,7 @@
 import logging
 import math
 import os
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from typing import Optional
 
 import httpx
@@ -75,7 +75,8 @@ class SensbeeClient:
         if time_grouping_seconds is not None:
             params["time_grouping"] = time_grouping_seconds
 
-        logger.debug("GET %s  params=%s", url, params)
+        # The READ key is left out of the log.
+        logger.debug("GET %s  params=%s", url, {k: v for k, v in params.items() if k != "key"})
 
         with httpx.Client(timeout=60.0) as client:
             resp = client.get(url, params=params)
@@ -101,7 +102,8 @@ def load_sensor_series_from_api(
     if from_time is None and to_time is None:
         if window_hours is None:
             raise ValueError("PROVIDE EITHER window_hours or from_time/to_time.")
-        to_time   = datetime.now()
+        # SensBee compares from/to with naive UTC timestamps, so "now" must be UTC, not local time.
+        to_time   = datetime.now(timezone.utc).replace(tzinfo=None)
         from_time = to_time - timedelta(hours=window_hours)
 
     # Auto-calculate limit: one bucket per interval across the full window + buffer.
@@ -141,10 +143,11 @@ def load_sensor_series_from_api(
     series = pd.to_numeric(df.set_index(time_col)[column_name], errors="coerce")
 
     # Reindex over the full requested window so overnight zeros are included.
+    # SensBee labels buckets floor(epoch / interval) * interval (:00/:15/:30/:45), so the grid is floored the same way.
     freq       = f"{resample_interval_minutes}min"
     full_index = pd.date_range(
-        start=from_time.replace(second=0, microsecond=0),
-        end=to_time.replace(second=0, microsecond=0),
+        start=pd.Timestamp(from_time).floor(freq),
+        end=pd.Timestamp(to_time).floor(freq),
         freq=freq,
     )
     series = series.reindex(full_index)
