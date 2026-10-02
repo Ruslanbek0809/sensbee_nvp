@@ -32,6 +32,14 @@ CLOSURE_GAP_MINUTES = 120  # 2 hours
 TOKEN_BUDGET_MAX_POINTS = 700
 
 
+# Fills a regular-grid event-based series (visitor counts): gaps up to CLOSURE_GAP_MINUTES are forward-filled (count
+# unchanged), longer gaps become 0 (facility closed), negative sensor anomalies become 0. Shared by the fixture loader
+# and the SensBee client, so fixtures and live data follow one rule.
+def fill_event_series(series: pd.Series, resample_interval_minutes: int) -> pd.Series:
+    ffill_limit = max(1, CLOSURE_GAP_MINUTES // resample_interval_minutes)
+    return series.ffill(limit=ffill_limit).fillna(0).clip(lower=0)
+
+
 # Loads a sensor time series from a local JSON file and returns a clean pd.Series.
 def load_sensor_series_from_json(
     path: Optional[str] = None,
@@ -84,17 +92,11 @@ def load_sensor_series_from_json(
         freq = f"{resample_interval_minutes}min"
 
         if is_event_based:
-            # Short gaps within a session: forward-fill (count unchanged).
-            # Long gaps overnight: fill with 0 (facility closed).
-            ffill_limit = max(1, CLOSURE_GAP_MINUTES // resample_interval_minutes)
-            resampled = series.resample(freq).last()
-            resampled = resampled.ffill(limit=ffill_limit)
-            resampled = resampled.fillna(0)
-            series = resampled
+            series = fill_event_series(series.resample(freq).last(), resample_interval_minutes)
             logger.info(
                 f"EVENT-BASED resampled '{column_name}' to {resample_interval_minutes}-min: "
                 f"{len(series)} PTS  "
-                f"(ffill limit={ffill_limit} buckets = {CLOSURE_GAP_MINUTES} min, "
+                f"(ffill limit {CLOSURE_GAP_MINUTES} min, "
                 f"OVERNIGHT GAPS FILL WITH 0)"
             )
         else:

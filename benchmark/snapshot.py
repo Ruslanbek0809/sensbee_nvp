@@ -10,6 +10,7 @@ import hashlib
 import json
 import logging
 import math
+import subprocess
 from pathlib import Path
 from typing import Optional
 
@@ -17,6 +18,7 @@ import pandas as pd
 
 logger = logging.getLogger(__name__)
 
+PROJECT_ROOT = Path(__file__).resolve().parent.parent
 TIME_COL = "created_at"
 TIME_FORMAT = "%Y-%m-%dT%H:%M:%S.%f"
 MANIFEST_NAME = "manifest.json"
@@ -27,6 +29,15 @@ BUCKETS_PER_WEEK = 7 * BUCKETS_PER_DAY
 
 # SensBee aggregation name → pandas aggregation (both skip nulls).
 AGGREGATIONS: dict[str, str] = {"AVG": "mean", "MAX": "max"}
+
+
+# Returns the sensbee_nvp commit and whether its working tree has uncommitted changes, for snapshot manifests and run
+# records. Without a git checkout (e.g. a copy on the cluster) both are None rather than a misleading "clean".
+def git_state() -> dict:
+    def git(*args: str) -> str:
+        return subprocess.run(["git", "-C", str(PROJECT_ROOT), *args], capture_output=True, text=True).stdout.strip()
+    commit = git("rev-parse", "HEAD") or None
+    return {"repo": "sensbee_nvp", "commit": commit, "dirty": bool(git("status", "--porcelain")) if commit else None}
 
 
 # Returns the SHA-256 hex digest of a file.

@@ -17,6 +17,8 @@ import httpx
 import pandas as pd
 from dotenv import load_dotenv
 
+from src.data_access.data_loader import EVENT_BASED_COLUMNS, fill_event_series
+
 load_dotenv()
 
 logger = logging.getLogger(__name__)
@@ -35,10 +37,6 @@ COLUMN_AGGREGATIONS: dict[str, str] = {
     "visitors_total": "MAX",
 }
 DEFAULT_AGGREGATION = "AVG"
-
-# Gaps this long with no visitor events mean the facility is closed.
-# Shorter gaps are forward-filled (occupancy unchanged between events).
-CLOSURE_GAP_MINUTES = 120
 
 
 # HTTP client for fetching sensor data from SensBee API.    
@@ -152,11 +150,8 @@ def load_sensor_series_from_api(
     )
     series = series.reindex(full_index)
 
-    is_event_based = column_name in {"visitors_total", "visitor_change"}
-    if is_event_based:
-        ffill_limit = max(1, CLOSURE_GAP_MINUTES // resample_interval_minutes)
-        series = series.ffill(limit=ffill_limit).fillna(0)
-        series = series.clip(lower=0)  # negative sensor anomalies → 0
+    if column_name in EVENT_BASED_COLUMNS:
+        series = fill_event_series(series, resample_interval_minutes)
     else:
         series = series.ffill().dropna()
 

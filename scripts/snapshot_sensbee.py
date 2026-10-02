@@ -15,7 +15,6 @@ import argparse
 import json
 import os
 import platform
-import subprocess
 import sys
 from datetime import datetime, timezone
 from pathlib import Path
@@ -30,7 +29,7 @@ PROJECT_ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(PROJECT_ROOT))
 
 from benchmark.snapshot import (  # noqa: E402
-    BUCKETS_PER_DAY, MANIFEST_NAME, TIME_COL, bucket_15min, quality_stats, write_raw_csv,
+    BUCKETS_PER_DAY, MANIFEST_NAME, TIME_COL, bucket_15min, git_state, quality_stats, write_raw_csv,
 )
 from src.data_access.sensbee_client import (  # noqa: E402
     COLUMN_AGGREGATIONS, DEFAULT_AGGREGATION, DEFAULT_BASE_URL, SensbeeClient,
@@ -100,13 +99,6 @@ def cross_check(client: SensbeeClient, sensor_id: str, api_key: Optional[str], r
         result[c] = {"aggregation": aggregations[c], "buckets_compared": len(joined), "mismatches": int((~same).sum()),
                      "max_abs_diff": float(diff) if pd.notna(diff) else 0.0}
     return result
-
-
-# Returns the sensbee_nvp commit and whether its working tree has uncommitted changes.
-def git_state() -> dict:
-    def git(*args: str) -> str:
-        return subprocess.run(["git", "-C", str(PROJECT_ROOT), *args], capture_output=True, text=True).stdout.strip()
-    return {"repo": "sensbee_nvp", "commit": git("rev-parse", "HEAD") or None, "dirty": bool(git("status", "--porcelain"))}
 
 
 # Formats the manifest as a short Markdown data-quality report.

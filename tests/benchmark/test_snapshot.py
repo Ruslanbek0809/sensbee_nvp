@@ -10,6 +10,7 @@ from unittest.mock import patch
 import pandas as pd
 import pytest
 
+from benchmark import snapshot
 from benchmark.snapshot import (
     MANIFEST_NAME, bucket_15min, load_snapshot, quality_stats, read_raw_csv, write_raw_csv,
 )
@@ -181,3 +182,9 @@ def test_snapshot_run_cross_checks_and_writes_no_secrets(tmp_path):
         if path.is_file():
             text = gzip.decompress(path.read_bytes()).decode() if path.suffix == ".gz" else path.read_text()
             assert FAKE_KEY not in text and FAKE_UUID not in text, path.name
+
+
+def test_git_state_is_unknown_without_a_git_checkout(tmp_path, monkeypatch):
+    # A copy without .git (e.g. deployed to the cluster) must not claim a clean tree.
+    monkeypatch.setattr(snapshot, "PROJECT_ROOT", tmp_path)
+    assert snapshot.git_state() == {"repo": "sensbee_nvp", "commit": None, "dirty": None}

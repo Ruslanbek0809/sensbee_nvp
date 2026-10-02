@@ -28,6 +28,11 @@ echo "Temporary directory: $TEMP_DIR"
 # Copy necessary files
 cp -r "$LOCAL_DIR/src" "$TEMP_DIR/"
 cp -r "$LOCAL_DIR/hpc_setup" "$TEMP_DIR/"
+# Benchmark harness (benchmark/ and its CLIs in scripts/). Data snapshots live outside this repo and are NOT copied;
+# copy one separately and pass its folder to scripts/run_harness.py --snapshot. Without .git on the cluster, run.json
+# records commit: null.
+cp -r "$LOCAL_DIR/benchmark" "$TEMP_DIR/"
+cp -r "$LOCAL_DIR/scripts" "$TEMP_DIR/"
 cp "$LOCAL_DIR/requirements.txt" "$TEMP_DIR/" 2>/dev/null || true
 
 # Copy data directory (required for benchmark: temp_* and eishalle_* JSON files)
