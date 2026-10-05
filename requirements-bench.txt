@@ -1,0 +1,11 @@
+# Benchmark environment: the dev requirements plus the AutoGluon stack (statistical baselines, trained models, TSFMs).
+# Its own venv, so the service venv stays light (no torch):
+#   python3.13 -m venv venv-bench && venv-bench/bin/pip install -r requirements-bench.txt
+# Python 3.13: autogluon.timeseries 1.6.3 requires Python < 3.14.
+-r requirements-dev.txt
+-c constraints.txt
+autogluon.timeseries==1.6.3
+# autogluon 1.6.3 pins coreforecast<0.0.17, which limits statsforecast to 2.0.x; 2.0.2 and 2.0.3 cap scipy<1.16, and
+# scipy wheels before 1.16 don't load on macOS 27 (dyld rejects their __thread_bss section). 2.0.1 has no scipy cap.
+statsforecast==2.0.1
+-c constraints-bench.txt
