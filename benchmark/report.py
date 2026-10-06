@@ -59,10 +59,10 @@ def _point_only(record: dict) -> bool:
 # Probabilistic metrics are NaN for point-only models.
 def cells(metrics: pd.DataFrame, records: dict[str, dict]) -> pd.DataFrame:
     ok = metrics[metrics["status"] != "failed"]
-    out = ok.groupby(KEYS)[list(METRICS)].mean()
+    out = ok.groupby(KEYS)[list(METRICS)].mean().reindex(metrics.groupby(KEYS).size().index)
     out["n_origins"] = ok.groupby(KEYS).size()
     out["n_failed"] = metrics[metrics["status"] == "failed"].groupby(KEYS).size()
-    out = out.reindex(metrics.groupby(KEYS).size().index).fillna({"n_origins": 0, "n_failed": 0}).reset_index()
+    out = out.fillna({"n_origins": 0, "n_failed": 0}).reset_index()
     point_only = out["model"].map(lambda m: _point_only(records[m]))
     out.loc[point_only, list(PROBABILISTIC)] = np.nan
     out["point_only"] = point_only
