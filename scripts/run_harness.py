@@ -3,14 +3,16 @@
 # others are not) and writes nothing. Otherwise one forecaster runs over the tasks and writes raw forecasts, metrics
 # and a run manifest to a new folder under --out, then the mean metrics per sensor, context and horizon are printed:
 # an in-house check forecaster (naive / seasonal naive; harness checks, not thesis baselines) or a baseline from
-# benchmark/models (AutoGluon / statsforecast; needs the bench venv). A baseline runs on its own allowed context
-# lengths unless --contexts picks some of them. No network; reads only the snapshot.
+# benchmark/models (AutoGluon / statsforecast; needs the bench venv), or a zero-shot foundation model (Chronos-2; bench
+# venv plus its downloaded weights). A model runs on its own allowed context lengths unless --contexts picks some of
+# them. No network; reads only the snapshot (set HF_HUB_OFFLINE=1 so model weights come only from the local cache).
 #
 # Usage (from sensbee_nvp/):
 #   venv/bin/python scripts/run_harness.py --snapshot ../../benchmark_data/snapshots/sensbee-2026-10-01 --dry-run
 #   venv/bin/python scripts/run_harness.py --snapshot <dir> --out <dir> --model seasonal_naive_96
 #   venv/bin/python scripts/run_harness.py --snapshot <dir> --out <dir> --model seasonal_naive_672 --contexts 28
 #   venv-bench/bin/python scripts/run_harness.py --snapshot <dir> --out <dir> --model ag_ets
+#   HF_HUB_OFFLINE=1 venv-bench/bin/python scripts/run_harness.py --snapshot <dir> --out <dir> --model chronos2
 
 import argparse
 import sys
@@ -22,7 +24,7 @@ PROJECT_ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(PROJECT_ROOT))
 
 from benchmark.metrics import METRICS  # noqa: E402
-from benchmark.models import BASELINES, library_versions  # noqa: E402
+from benchmark.models import BASELINES, ZERO_SHOT, library_versions  # noqa: E402
 from benchmark.runner import CHECK_FORECASTERS, run  # noqa: E402
 from benchmark.snapshot import load_snapshot  # noqa: E402
 from benchmark.tasks import CONTEXT_DAYS, TASKS, origin_table, target_series  # noqa: E402
@@ -69,13 +71,14 @@ def main() -> None:
     parser = argparse.ArgumentParser(description="Benchmark harness on a frozen snapshot (no network)")
     parser.add_argument("--snapshot", type=Path, required=True, help="snapshot folder (with manifest.json)")
     parser.add_argument("--out", type=Path, help="parent folder; a new <run id> folder is created (not for --dry-run)")
-    parser.add_argument("--model", choices=[*CHECK_FORECASTERS, *BASELINES], help="check forecaster or baseline")
+    parser.add_argument("--model", choices=[*CHECK_FORECASTERS, *BASELINES, *ZERO_SHOT],
+                        help="check forecaster, baseline or zero-shot model")
     parser.add_argument("--dry-run", action="store_true", help="list the origins per sensor and write nothing")
     parser.add_argument("--sensors", nargs="+", choices=list(TASKS), default=list(TASKS))
     parser.add_argument("--period", choices=["test", "validation"], default="test")
     parser.add_argument("--contexts", nargs="+",
                         help="context lengths in days, or 'all' for the whole history before each origin "
-                             "(default: all of CONTEXT_DAYS, or a baseline's allowed lengths)")
+                             "(default: all of CONTEXT_DAYS, or a model's allowed lengths)")
     parser.add_argument("--seed", type=int, default=0)
     args = parser.parse_args()
 
@@ -85,8 +88,9 @@ def main() -> None:
     if args.out is None or args.model is None:
         parser.error("--out and --model are required unless --dry-run")
     model_info = {}
-    if args.model in BASELINES:
-        baseline = BASELINES[args.model]
+    models = {**BASELINES, **ZERO_SHOT}
+    if args.model in models:
+        baseline = models[args.model]
         contexts = baseline.contexts if args.contexts is None else tuple(
             None if c == "all" else int(c) for c in args.contexts)
         if not set(contexts) <= set(baseline.contexts):

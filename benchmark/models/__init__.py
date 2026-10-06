@@ -2,19 +2,23 @@
 # step): AutoGluon's local models and statsforecast's MSTL behind the runner contract. Each entry gives a builder
 # (returns the forecaster and the parameters recorded in run.json), the context lengths in days it may run on, and
 # whether it is scored as a point forecaster. Heavy libraries load only when a forecaster is built or called, so this
-# module imports in the service venv too.
+# module imports in the service venv too. Zero-shot foundation models (ZERO_SHOT) are kept apart from the baselines:
+# they need downloaded weights, so their tests run only with -m integration.
 
 from dataclasses import dataclass
 from importlib.metadata import PackageNotFoundError, version
 from typing import Callable
 
 from benchmark.models.autogluon_models import autogluon_forecaster
+from benchmark.models.chronos_models import chronos2_forecaster
 from benchmark.models.statsforecast_models import mstl_forecaster
 from benchmark.tasks import SEASON
 
 WEEK = 7 * SEASON
 REFERENCE = ("ag_snaive96", 28)  # model and context (days) every relative score is computed against (D-B6)
-PACKAGES = ("autogluon.timeseries", "statsforecast", "statsmodels", "scipy", "torch", "coreforecast", "joblib")
+CHRONOS2 = ("amazon/chronos-2", "29ec3766d36d6f73f0696f85560a422f50e8498c")  # Hugging Face model id and revision
+PACKAGES = ("autogluon.timeseries", "statsforecast", "statsmodels", "scipy", "torch", "coreforecast", "joblib",
+            "chronos-forecasting", "transformers", "huggingface_hub", "accelerate")
 
 
 # One baseline: build() → (forecaster, parameters); contexts: the allowed context lengths in days.
@@ -40,6 +44,11 @@ BASELINES: dict[str, Baseline] = {
     "sf_mstl_d": Baseline(lambda: mstl_forecaster([SEASON]), (7, 14, 28)),
     "sf_mstl_dw": Baseline(lambda: mstl_forecaster([SEASON, WEEK]), (14, 28)),
     "sf_mstl_arima": Baseline(lambda: mstl_forecaster([SEASON], trend="arima"), (7, 14, 28)),
+}
+
+# Zero-shot foundation models, on the same context lengths as the baselines.
+ZERO_SHOT: dict[str, Baseline] = {
+    "chronos2": Baseline(lambda: chronos2_forecaster(*CHRONOS2), (1, 7, 14, 28)),
 }
 
 
