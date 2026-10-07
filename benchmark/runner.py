@@ -108,6 +108,12 @@ def _predict(forecaster: Forecaster, contexts: list[pd.Series], levels: tuple[fl
     return out, statuses
 
 
+# Context lengths (days) the origin validity rule covers for a run: CONTEXT_DAYS plus the run's numeric lengths
+# ("all history" has no fixed window to check).
+def validity_context_days(context_days: tuple[Optional[int], ...]) -> tuple[int, ...]:
+    return tuple(sorted(set(CONTEXT_DAYS) | {days for days in context_days if days is not None}))
+
+
 # Long table of one batch: one row per (origin, step) with the true value and the quantiles.
 def _forecast_frame(sensor: str, context: str, origins: list[pd.Timestamp], status: list[str], targets: np.ndarray,
                     quantiles: np.ndarray, levels: tuple[float, ...]) -> pd.DataFrame:
@@ -127,7 +133,9 @@ def _forecast_frame(sensor: str, context: str, origins: list[pd.Timestamp], stat
 
 # Runs a forecaster over the given tasks (default: all TASKS) for one period and context lengths (days; None = all
 # history before the origin), and writes the results to out_root/<run_id>. run_id defaults to
-# "<UTC start time>_<model>". Raises FileExistsError if that folder exists. Returns the run folder.
+# "<UTC start time>_<model>". Origin validity covers CONTEXT_DAYS plus the run's own context lengths, so a longer
+# context is checked too; with the default contexts the origins are the same as before. Raises FileExistsError if that
+# folder exists. Returns the run folder.
 def run(forecaster: Forecaster, model: str, snapshot_dir: Path, out_root: Path,
         tasks: Optional[dict[str, SensorTask]] = None, period: str = "test",
         context_days: tuple[Optional[int], ...] = CONTEXT_DAYS, seed: int = 0, run_id: Optional[str] = None,
@@ -143,10 +151,11 @@ def run(forecaster: Forecaster, model: str, snapshot_dir: Path, out_root: Path,
     frames = load_snapshot(snapshot_dir)
     manifest = json.loads((snapshot_dir / MANIFEST_NAME).read_text())
     levels = QUANTILE_LEVELS
+    validity_days = validity_context_days(context_days)
     forecast_frames, metric_rows, origin_frames, counts = [], [], [], {}
     for sensor, task in tasks.items():
         series = target_series(frames[sensor], task)
-        table = origin_table(series, task, period)
+        table = origin_table(series, task, period, validity_days)
         origin_frames.append(table.assign(sensor=sensor))
         origins = list(table.loc[table["valid"], "origin"])
         scales = [seasonal_scale(scale_history(series, origin, task), SEASON) for origin in origins]
@@ -192,6 +201,7 @@ def run(forecaster: Forecaster, model: str, snapshot_dir: Path, out_root: Path,
         "snapshot": {"id": manifest["snapshot_id"], "manifest_sha256": sha256_file(snapshot_dir / MANIFEST_NAME)},
         "period": period,
         "context_days": [days if days is not None else "all" for days in context_days],
+        "validity_context_days": list(validity_days),
         "settings": {
             "horizon": HORIZON, "report_steps": list(REPORT_STEPS), "quantile_levels": list(levels),
             "origin_freq": ORIGIN_FREQ, "guard_hours": GUARD / pd.Timedelta("1h"),

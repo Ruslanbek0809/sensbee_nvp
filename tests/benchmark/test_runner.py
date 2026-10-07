@@ -92,6 +92,19 @@ def test_run_writes_raw_results_and_provenance(tmp_path):
     assert record["counts"]["W"]["undefined_scale"] == 13  # an exactly periodic series has a zero seasonal scale
     assert record["settings"]["quantile_levels"] == list(QUANTILE_LEVELS)
     assert {"commit", "dirty"} <= set(record["code"]) and {"numpy", "pandas"} <= set(record["versions"])
+    assert record["validity_context_days"] == [1, 7, 14, 28]  # the default rule, not stored in settings
+    assert "validity_context_days" not in record["settings"]
+
+
+# A run with a context longer than CONTEXT_DAYS checks that length too: 33 days need history from 2025-12-31 for the
+# first origins, which the series doesn't have, so only the 5 origins from 2026-02-03 00:00 on stay valid.
+def test_a_longer_run_context_is_part_of_the_validity_rule(tmp_path):
+    snapshot_dir, tasks = _snapshot(tmp_path)
+    record = _record(run(naive_forecaster, "naive", snapshot_dir, tmp_path / "runs", tasks=tasks, context_days=(1, 33)))
+
+    assert record["validity_context_days"] == [1, 7, 14, 28, 33]
+    assert record["counts"]["W"]["valid"] == 5
+    assert record["counts"]["W"]["reasons"] == {"ok": 5, "short_history": 8}
 
 
 def test_mase_and_sql_use_the_28_days_before_each_origin(tmp_path):

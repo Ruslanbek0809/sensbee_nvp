@@ -137,6 +137,26 @@ def test_origin_validity_reasons():
     assert origin_table(series, task, "validation").iloc[0]["reason"] == "short_history"
 
 
+# A longer context passed to origin_table is checked like the default ones: a week-long gap 6–7 weeks before the
+# origin leaves every default window complete but the 56-day window only 49/56 observed; 56 days also need more
+# history.
+def test_longer_contexts_are_checked_only_when_passed():
+    times = pd.date_range("2026-01-01", "2026-03-02", freq="15min", inclusive="left")
+    keep = ~((times >= "2026-01-05") & (times < "2026-01-12"))
+    raw = pd.DataFrame({"created_at": times[keep], "temperature": np.full(int(keep.sum()), 10.0)})
+    task = SensorTask("temperature", "AVG", "regular", "2026-02-01", "2026-03-01")
+    series = target_series(raw, task)
+    default = origin_table(series, task, "test").set_index("origin")
+    longer = origin_table(series, task, "test", (1, 7, 14, 28, 56)).set_index("origin")
+    origin = pd.Timestamp("2026-02-28 00:00")
+
+    assert default.loc[origin, "reason"] == "ok" and "coverage_56d" not in default.columns
+    assert longer.loc[origin, "reason"] == "low_coverage"
+    assert longer.loc[origin, "coverage_56d"] == round(49 / 56, 4)
+    assert longer.loc[pd.Timestamp("2026-02-05 00:00"), "reason"] == "short_history"  # 56 days start in Dec 2025
+    assert default.loc[pd.Timestamp("2026-02-05 00:00"), "reason"] == "low_coverage"  # its 28 days hold the gap
+
+
 def test_scale_ignores_excluded_buckets():
     # A counter rising by 1 per bucket has |y_t - y_{t-96}| = 96 everywhere; zeros from an outage inflate the scale
     # unless the outage is excluded.

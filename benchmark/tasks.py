@@ -107,19 +107,21 @@ def _observed_share(cumulative: np.ndarray, first: pd.Timestamp, start: pd.Times
 
 # Applies the validity rule to every candidate origin of a period. An origin is valid when no listed exclusion
 # overlaps [origin - 24 h, origin + 24 h), the longest context lies inside the series, both 24-h windows around the
-# origin are complete, and every context window is at least MIN_CONTEXT_COVERAGE observed. Filled kinds (visitors,
-# counter) have no gaps, so only the exclusions and the series bounds apply to them. Returns one row per candidate:
-# the first failing reason, the observed share of each context window, and whether an exclusion lies inside the
-# longest context (for a sensitivity check).
-def origin_table(series: pd.Series, task: SensorTask, period: str) -> pd.DataFrame:
+# origin are complete, and every context window is at least MIN_CONTEXT_COVERAGE observed. context_days: the context
+# lengths (days) the rule covers; a run with longer contexts passes them too, so its long windows are checked as well.
+# Filled kinds (visitors, counter) have no gaps, so only the exclusions and the series bounds apply to them. Returns
+# one row per candidate: the first failing reason, the observed share of each context window, and whether an exclusion
+# lies inside the longest context (for a sensitivity check).
+def origin_table(series: pd.Series, task: SensorTask, period: str,
+                 context_days: tuple[int, ...] = CONTEXT_DAYS) -> pd.DataFrame:
     cumulative = np.concatenate([[0], np.cumsum(series.notna().to_numpy())])
     first = series.index[0]
     exclusions = [(pd.Timestamp(start), pd.Timestamp(end)) for start, end, _ in task.exclusions]
-    longest = pd.Timedelta(days=max(CONTEXT_DAYS))
+    longest = pd.Timedelta(days=max(context_days))
     rows = []
     for origin in candidate_origins(task, period):
         coverage = {days: _observed_share(cumulative, first, origin - pd.Timedelta(days=days), origin)
-                    for days in CONTEXT_DAYS}
+                    for days in context_days}
         if any(start < origin + GUARD and end > origin - GUARD for start, end in exclusions):
             reason = "excluded"
         elif origin - longest < first:
