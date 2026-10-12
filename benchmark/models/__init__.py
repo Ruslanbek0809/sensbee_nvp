@@ -15,6 +15,7 @@ from benchmark.models.autogluon_models import autogluon_forecaster
 from benchmark.models.chronos_models import chronos2_forecaster, chronos_bolt_forecaster
 from benchmark.models.statsforecast_models import mstl_forecaster
 from benchmark.models.timesfm_models import timesfm25_forecaster
+from benchmark.models.tirex_models import tirex_forecaster
 from benchmark.tasks import SEASON
 
 WEEK = 7 * SEASON
@@ -58,15 +59,21 @@ BASELINES: dict[str, Baseline] = {
 }
 
 # Zero-shot foundation models. Chronos-2 reads up to 8,192 steps, so 85 days (8,160 steps) is its longest context.
+# A zero-shot model pinned to one (model id, revision): its forecaster factory is built with that pin, and the cache
+# check of its tests looks for the weight file at the same pin.
+def _zero_shot(factory: Callable, pin: tuple[str, str], contexts: tuple[int, ...],
+               weight_file: str = "model.safetensors") -> Baseline:
+    return Baseline(lambda: factory(*pin), contexts, (*pin, weight_file))
+
+
 ZERO_SHOT: dict[str, Baseline] = {
-    "chronos2": Baseline(lambda: chronos2_forecaster(*CHRONOS2), (1, 2, 7, 14, 28, 56, 85),
-                         (*CHRONOS2, "model.safetensors")),
+    "chronos2": _zero_shot(chronos2_forecaster, CHRONOS2, (1, 2, 7, 14, 28, 56, 85)),
     # Chronos-Bolt reads at most 2,048 steps: its 28-day context is cut to the last 21.3 days by the model.
-    "chronos_bolt_base": Baseline(lambda: chronos_bolt_forecaster(*CHRONOS_BOLT_BASE), (1, 2, 7, 14, 28),
-                                  (*CHRONOS_BOLT_BASE, "model.safetensors")),
+    "chronos_bolt_base": _zero_shot(chronos_bolt_forecaster, CHRONOS_BOLT_BASE, (1, 2, 7, 14, 28)),
     # TimesFM 2.5 reads up to 16,256 steps next to its 128-step output block, so 169 days (16,224 steps) is its longest.
-    "timesfm25": Baseline(lambda: timesfm25_forecaster(*TIMESFM25), (1, 2, 7, 14, 28, 56, 85, 169),
-                          (*TIMESFM25, "model.safetensors")),
+    "timesfm25": _zero_shot(timesfm25_forecaster, TIMESFM25, (1, 2, 7, 14, 28, 56, 85, 169)),
+    # TiRex reads at most 2,048 steps: its 28-day context is cut to the last 21.3 days by the model.
+    "tirex": _zero_shot(tirex_forecaster, TIREX, (1, 2, 7, 14, 28), "model.ckpt"),
 }
 
 

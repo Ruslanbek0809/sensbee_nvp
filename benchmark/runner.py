@@ -29,7 +29,7 @@ from benchmark.snapshot import (
 from benchmark.tasks import (
     CLOSURE_GAP_BUCKETS, CONTEXT_DAYS, GUARD, HORIZON, MIN_CONTEXT_COVERAGE, ORIGIN_FREQ, QUANTILE_LEVELS,
     REPORT_STEPS, SCALE_DAYS, SEASON, TASKS, VALIDATION_DAYS, SensorTask, context_window, origin_table, scale_history,
-    target_series, target_window,
+    target_series, target_window, validity_context_days,
 )
 
 logger = logging.getLogger(__name__)
@@ -108,12 +108,6 @@ def _predict(forecaster: Forecaster, contexts: list[pd.Series], levels: tuple[fl
     return out, statuses
 
 
-# Context lengths (days) the origin validity rule covers for a run: CONTEXT_DAYS plus the run's numeric lengths
-# ("all history" has no fixed window to check).
-def validity_context_days(context_days: tuple[Optional[int], ...]) -> tuple[int, ...]:
-    return tuple(sorted(set(CONTEXT_DAYS) | {days for days in context_days if days is not None}))
-
-
 # Long table of one batch: one row per (origin, step) with the true value and the quantiles.
 def _forecast_frame(sensor: str, context: str, origins: list[pd.Timestamp], status: list[str], targets: np.ndarray,
                     quantiles: np.ndarray, levels: tuple[float, ...]) -> pd.DataFrame:
@@ -151,11 +145,10 @@ def run(forecaster: Forecaster, model: str, snapshot_dir: Path, out_root: Path,
     frames = load_snapshot(snapshot_dir)
     manifest = json.loads((snapshot_dir / MANIFEST_NAME).read_text())
     levels = QUANTILE_LEVELS
-    validity_days = validity_context_days(context_days)
     forecast_frames, metric_rows, origin_frames, counts = [], [], [], {}
     for sensor, task in tasks.items():
         series = target_series(frames[sensor], task)
-        table = origin_table(series, task, period, validity_days)
+        table = origin_table(series, task, period, context_days)
         origin_frames.append(table.assign(sensor=sensor))
         origins = list(table.loc[table["valid"], "origin"])
         scales = [seasonal_scale(scale_history(series, origin, task), SEASON) for origin in origins]
@@ -201,7 +194,7 @@ def run(forecaster: Forecaster, model: str, snapshot_dir: Path, out_root: Path,
         "snapshot": {"id": manifest["snapshot_id"], "manifest_sha256": sha256_file(snapshot_dir / MANIFEST_NAME)},
         "period": period,
         "context_days": [days if days is not None else "all" for days in context_days],
-        "validity_context_days": list(validity_days),
+        "validity_context_days": list(validity_context_days(context_days)),
         "settings": {
             "horizon": HORIZON, "report_steps": list(REPORT_STEPS), "quantile_levels": list(levels),
             "origin_freq": ORIGIN_FREQ, "guard_hours": GUARD / pd.Timedelta("1h"),

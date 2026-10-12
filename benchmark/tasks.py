@@ -105,15 +105,22 @@ def _observed_share(cumulative: np.ndarray, first: pd.Timestamp, start: pd.Times
     return float(cumulative[b] - cumulative[a]) / ((end - start) // STEP)
 
 
+# Context lengths (days) the origin validity rule covers: CONTEXT_DAYS plus the given lengths ("all history", None,
+# has no fixed window to check).
+def validity_context_days(context_days: tuple[Optional[int], ...] = ()) -> tuple[int, ...]:
+    return tuple(sorted(set(CONTEXT_DAYS) | {days for days in context_days if days is not None}))
+
+
 # Applies the validity rule to every candidate origin of a period. An origin is valid when no listed exclusion
 # overlaps [origin - 24 h, origin + 24 h), the longest context lies inside the series, both 24-h windows around the
-# origin are complete, and every context window is at least MIN_CONTEXT_COVERAGE observed. context_days: the context
-# lengths (days) the rule covers; a run with longer contexts passes them too, so its long windows are checked as well.
+# origin are complete, and every context window is at least MIN_CONTEXT_COVERAGE observed. The context windows are
+# CONTEXT_DAYS plus the given context_days, so a run with longer contexts has its long windows checked as well.
 # Filled kinds (visitors, counter) have no gaps, so only the exclusions and the series bounds apply to them. Returns
 # one row per candidate: the first failing reason, the observed share of each context window, and whether an exclusion
 # lies inside the longest context (for a sensitivity check).
 def origin_table(series: pd.Series, task: SensorTask, period: str,
-                 context_days: tuple[int, ...] = CONTEXT_DAYS) -> pd.DataFrame:
+                 context_days: tuple[Optional[int], ...] = ()) -> pd.DataFrame:
+    context_days = validity_context_days(context_days)
     cumulative = np.concatenate([[0], np.cumsum(series.notna().to_numpy())])
     first = series.index[0]
     exclusions = [(pd.Timestamp(start), pd.Timestamp(end)) for start, end, _ in task.exclusions]

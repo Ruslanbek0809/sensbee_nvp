@@ -10,7 +10,7 @@
 import numpy as np
 import pandas as pd
 
-from benchmark.tasks import BUCKETS_PER_DAY, context_window
+from benchmark.tasks import BUCKETS_PER_DAY
 
 KEYS = ["model", "sensor", "context", "origin"]
 
@@ -58,14 +58,16 @@ def hour_table(metrics: pd.DataFrame, reference: pd.DataFrame, metric: str = "MA
 
 
 # Largest |reference median − the last day of the context| over all origins of the reference rows, per sensor: 0 when
-# the reference forecast repeats the last observed day exactly. series: the target series of each sensor.
+# the reference forecast repeats the last observed day exactly. series: the target series of each sensor. The last day
+# is taken from the forward-filled series as tasks.context_window does (forward filling never looks ahead), so the
+# series is filled once per sensor rather than once per origin.
 def reference_last_day_difference(reference: pd.DataFrame, series: dict[str, pd.Series]) -> dict[str, float]:
+    keys, medians = _median_windows(reference.assign(model="reference"))
     out = {}
-    for sensor, rows in reference[reference["status"] != "failed"].groupby("sensor"):
-        worst = 0.0
-        for origin, window in rows.groupby("origin"):
-            last_day = context_window(series[sensor], pd.Timestamp(origin), BUCKETS_PER_DAY).to_numpy(dtype=float)
-            median = window.sort_values("step")["q0.5"].to_numpy(dtype=float)
-            worst = max(worst, float(np.abs(median - np.resize(last_day, len(median))).max()))
-        out[sensor] = worst
+    for sensor, rows in keys.groupby("sensor").groups.items():
+        filled = series[sensor].ffill().dropna()
+        values = filled.to_numpy(dtype=float)
+        ends = filled.index.searchsorted(pd.to_datetime(keys.loc[rows, "origin"]))  # first bucket at or after origin
+        last_days = np.stack([values[end - BUCKETS_PER_DAY:end] for end in ends])
+        out[sensor] = float(np.abs(medians[rows] - last_days).max())
     return out

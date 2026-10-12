@@ -4,9 +4,9 @@
 # run. Otherwise one forecaster runs over the tasks and writes raw forecasts, metrics and a run manifest to a new
 # folder under --out, then the mean metrics per sensor, context and horizon are printed: an in-house check forecaster
 # (naive / seasonal naive; harness checks, not thesis baselines) or a baseline from benchmark/models (AutoGluon /
-# statsforecast; needs the bench venv), or a zero-shot foundation model (Chronos-2, Chronos-Bolt, TimesFM 2.5; bench
-# venv plus their downloaded weights). A model runs on its own allowed context lengths unless --contexts picks some
-# of them. No network; reads only the snapshot (set HF_HUB_OFFLINE=1 so model weights come only from the local
+# statsforecast; needs the bench venv), or a zero-shot foundation model (Chronos-2, Chronos-Bolt, TimesFM 2.5, TiRex;
+# bench venv plus their downloaded weights). A model runs on its own allowed context lengths unless --contexts picks
+# some of them. No network; reads only the snapshot (set HF_HUB_OFFLINE=1 so model weights come only from the local
 # cache).
 #
 # Usage (from sensbee_nvp/):
@@ -18,10 +18,12 @@
 #   HF_HUB_OFFLINE=1 venv-bench/bin/python scripts/run_harness.py --snapshot <dir> --out <dir> --model chronos2
 #   HF_HUB_OFFLINE=1 venv-bench/bin/python scripts/run_harness.py --snapshot <dir> --out <dir> --model chronos_bolt_base
 #   HF_HUB_OFFLINE=1 venv-bench/bin/python scripts/run_harness.py --snapshot <dir> --out <dir> --model timesfm25
+#   HF_HUB_OFFLINE=1 venv-bench/bin/python scripts/run_harness.py --snapshot <dir> --out <dir> --model tirex
 
 import argparse
 import sys
 from pathlib import Path
+from typing import Optional
 
 import pandas as pd
 
@@ -30,20 +32,20 @@ sys.path.insert(0, str(PROJECT_ROOT))
 
 from benchmark.metrics import METRICS  # noqa: E402
 from benchmark.models import BASELINES, ZERO_SHOT, library_versions  # noqa: E402
-from benchmark.runner import CHECK_FORECASTERS, run, validity_context_days  # noqa: E402
+from benchmark.runner import CHECK_FORECASTERS, run  # noqa: E402
 from benchmark.snapshot import load_snapshot  # noqa: E402
-from benchmark.tasks import CONTEXT_DAYS, TASKS, origin_table, target_series  # noqa: E402
+from benchmark.tasks import CONTEXT_DAYS, TASKS, origin_table, target_series, validity_context_days  # noqa: E402
 
 INVALID_REASONS = ("excluded", "short_history", "target_gap", "recent_gap", "low_coverage")
 
 
 # One row per sensor: candidate origins of the period, how many are valid, the count per reason for the others, the
 # lowest 7-day context coverage among the valid ones (and of the longest checked context), and how many valid origins
-# have an exclusion inside their context. context_days: the context lengths the validity rule covers.
+# have an exclusion inside their context. context_days: context lengths checked on top of CONTEXT_DAYS, as in a run.
 def dry_run(snapshot_dir: Path, sensors: list[str], period: str,
-            context_days: tuple[int, ...] = CONTEXT_DAYS) -> pd.DataFrame:
+            context_days: tuple[Optional[int], ...] = ()) -> pd.DataFrame:
     frames = load_snapshot(snapshot_dir)
-    longest = max(context_days)
+    longest = max(validity_context_days(context_days))
     rows = []
     for name in sensors:
         table = origin_table(target_series(frames[name], TASKS[name]), TASKS[name], period, context_days)
@@ -89,11 +91,10 @@ def main() -> None:
                              "(default: all of CONTEXT_DAYS, or a model's allowed lengths)")
     parser.add_argument("--seed", type=int, default=0)
     args = parser.parse_args()
+    requested = None if args.contexts is None else tuple(None if c == "all" else int(c) for c in args.contexts)
 
     if args.dry_run:
-        requested = tuple(None if c == "all" else int(c) for c in (args.contexts or CONTEXT_DAYS))
-        table = dry_run(args.snapshot, args.sensors, args.period, validity_context_days(requested))
-        print(table.to_string(index=False))
+        print(dry_run(args.snapshot, args.sensors, args.period, requested or ()).to_string(index=False))
         return
     if args.out is None or args.model is None:
         parser.error("--out and --model are required unless --dry-run")
@@ -101,15 +102,14 @@ def main() -> None:
     models = {**BASELINES, **ZERO_SHOT}
     if args.model in models:
         baseline = models[args.model]
-        contexts = baseline.contexts if args.contexts is None else tuple(
-            None if c == "all" else int(c) for c in args.contexts)
+        contexts = baseline.contexts if requested is None else requested
         if not set(contexts) <= set(baseline.contexts):
             parser.error(f"{args.model} runs only on contexts {list(baseline.contexts)} (days)")
         forecaster, params = baseline.build()
         model_info = library_versions()
     else:
         forecaster, params = CHECK_FORECASTERS[args.model]
-        contexts = tuple(None if c == "all" else int(c) for c in (args.contexts or CONTEXT_DAYS))
+        contexts = requested or CONTEXT_DAYS
     run_dir = run(forecaster, args.model, args.snapshot, args.out, tasks={name: TASKS[name] for name in args.sensors},
                   period=args.period, context_days=contexts, seed=args.seed, model_params=params,
                   model_info=model_info)

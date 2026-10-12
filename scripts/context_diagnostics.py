@@ -22,33 +22,60 @@ sys.path.insert(0, str(PROJECT_ROOT))
 
 from benchmark.diagnostics import hour_table, reference_last_day_difference, shape_table  # noqa: E402
 from benchmark.models import REFERENCE  # noqa: E402
+from benchmark.report import _context_order, load_runs  # noqa: E402
 from benchmark.snapshot import git_state, load_snapshot  # noqa: E402
 from benchmark.tasks import TASKS, target_series  # noqa: E402
 
 FORECAST_COLUMNS = ["sensor", "context", "origin", "step", "status", "y", "q0.1", "q0.5", "q0.9"]
 
 
-# Days of a context label ("7d" → 7, "all" → inf), for sorting.
-def _days(label: str) -> float:
-    return float("inf") if label == "all" else float(label.rstrip("d"))
+# Loads the runs (report.load_runs: same snapshot, period and settings, one run per model) and splits off the
+# reference at its context. Returns (records by model, model forecasts, model metrics, reference forecasts, reference
+# metrics); model rows carry a "model" column.
+def _load(run_dirs: list[Path]) -> tuple[dict, pd.DataFrame, pd.DataFrame, pd.DataFrame, pd.DataFrame]:
+    ref_model, ref_context = REFERENCE[0], f"{REFERENCE[1]}d"
+    records, metrics = load_runs(run_dirs)
+    if ref_model not in records:
+        raise ValueError(f"--runs must include the reference run ({ref_model})")
+    forecasts, reference = [], None
+    for model, record in records.items():
+        rows = pd.read_csv(Path(record["dir"]) / "forecasts.csv.gz", usecols=FORECAST_COLUMNS)
+        if model == ref_model:
+            reference = rows[rows["context"] == ref_context]
+        else:
+            forecasts.append(rows.assign(model=model))
+    is_ref = metrics["model"] == ref_model
+    reference_metrics = metrics[is_ref & (metrics["context"] == ref_context)]
+    return records, pd.concat(forecasts, ignore_index=True), metrics[~is_ref], reference, reference_metrics
 
 
-# A figure per model and sensor: rows = 3 origins (at a quarter, half and three quarters of the reference's origins),
-# columns = the given contexts; truth, the model's median with its 10–90% band, and the reference's median.
+# Per model, sensor and context: the number of origins, how many have a defined shape (a constant reference, e.g. after
+# a closed day, has none), and the median amplitude ratio and shape correlation; contexts sorted by length.
+def _shape_summary(shape: pd.DataFrame) -> pd.DataFrame:
+    summary = shape.groupby(["model", "sensor", "context"]).agg(
+        n_origins=("origin", "size"), n_defined=("shape_correlation", "count"),
+        median_amplitude_ratio=("amplitude_ratio", "median"),
+        median_shape_correlation=("shape_correlation", "median")).reset_index()
+    return summary.sort_values(["model", "sensor", "context"], key=_context_order, ignore_index=True)
+
+
+# A figure per model and sensor from that sensor's rows: rows = 3 origins (at a quarter, half and three quarters of the
+# reference's origins), columns = the given contexts; truth, the model's median with its 10–90% band, and the
+# reference's median.
 def _figure(path: Path, model: str, sensor: str, rows: pd.DataFrame, reference: pd.DataFrame,
             contexts: list[str]) -> None:
     import matplotlib
     matplotlib.use("Agg")
     import matplotlib.pyplot as plt
-    origins = sorted(reference.loc[reference["sensor"] == sensor, "origin"].unique())
+    origins = sorted(reference["origin"].unique())
     picks = [origins[int(len(origins) * share)] for share in (0.25, 0.5, 0.75)]
     fig, axes = plt.subplots(len(picks), len(contexts), figsize=(4 * len(contexts), 2.6 * len(picks)), squeeze=False)
     for i, origin in enumerate(picks):
-        ref = reference[(reference["sensor"] == sensor) & (reference["origin"] == origin)].sort_values("step")
+        ref = reference[reference["origin"] == origin].sort_values("step")
+        own_origin = rows[rows["origin"] == origin]
         for j, context in enumerate(contexts):
             ax = axes[i][j]
-            own = rows[(rows["sensor"] == sensor) & (rows["origin"] == origin) & (rows["context"] == context)]
-            own = own.sort_values("step")
+            own = own_origin[own_origin["context"] == context].sort_values("step")
             ax.plot(ref["step"], ref["y"], color="black", lw=1, label="truth")
             ax.plot(ref["step"], ref["q0.5"], color="grey", lw=1, ls="--", label="reference median")
             if len(own):
@@ -77,31 +104,9 @@ def main() -> None:
     out_dir = args.out / f"{started:%Y-%m-%dT%H%M%SZ}_context_diagnostics"
     if out_dir.exists():
         raise FileExistsError(f"{out_dir} EXISTS; outputs are never overwritten")
-    ref_model, ref_context = REFERENCE[0], f"{REFERENCE[1]}d"
-    forecasts, metrics, runs, reference, reference_metrics = [], [], {}, None, None
-    for run_dir in args.runs:
-        record = json.loads((run_dir / "run.json").read_text())
-        model = record["model"]
-        runs[model] = record["run_id"]
-        rows = pd.read_csv(run_dir / "forecasts.csv.gz", usecols=FORECAST_COLUMNS)
-        run_metrics = pd.read_csv(run_dir / "metrics.csv")
-        if model == ref_model:
-            reference = rows[rows["context"] == ref_context]
-            reference_metrics = run_metrics[run_metrics["context"] == ref_context]
-        else:
-            forecasts.append(rows.assign(model=model))
-            metrics.append(run_metrics.assign(model=model))
-    if reference is None:
-        parser.error(f"--runs must include the reference run ({ref_model})")
-    forecasts, metrics = pd.concat(forecasts, ignore_index=True), pd.concat(metrics, ignore_index=True)
-
+    records, forecasts, metrics, reference, reference_metrics = _load(args.runs)
     shape = shape_table(forecasts, reference)
-    summary = shape.groupby(["model", "sensor", "context"]).agg(
-        n_origins=("origin", "size"), n_defined=("shape_correlation", "count"),
-        median_amplitude_ratio=("amplitude_ratio", "median"),
-        median_shape_correlation=("shape_correlation", "median")).reset_index()
-    summary = summary.sort_values(["model", "sensor", "context"], key=lambda c: c.map(_days) if c.name == "context"
-                                  else c, ignore_index=True)
+    summary = _shape_summary(shape)
     by_hour = hour_table(metrics[metrics["context"].isin(args.hour_contexts)], reference_metrics)
     frames = load_snapshot(args.snapshot)
     series = {name: target_series(frames[name], TASKS[name]) for name in reference["sensor"].unique()}
@@ -114,12 +119,14 @@ def main() -> None:
     for model, rows in forecasts.groupby("model"):
         contexts = [c for c in args.hour_contexts if c in set(rows["context"])]
         for sensor in args.figure_sensors:
-            if contexts and sensor in set(rows["sensor"]):
-                _figure(out_dir / f"{model}_{sensor}.png", model, sensor, rows, reference, contexts)
+            sensor_rows = rows[rows["sensor"] == sensor]
+            if contexts and len(sensor_rows):
+                _figure(out_dir / f"{model}_{sensor}.png", model, sensor, sensor_rows,
+                        reference[reference["sensor"] == sensor], contexts)
     (out_dir / "diagnostics.json").write_text(json.dumps({
-        "runs": runs, "reference": list(REFERENCE), "reference_last_day_max_difference": last_day,
-        "snapshot": str(args.snapshot), "hour_contexts": args.hour_contexts, "code": git_state(),
-        "created_utc": started.strftime("%Y-%m-%dT%H:%M:%S"),
+        "runs": {model: record["run_id"] for model, record in records.items()}, "reference": list(REFERENCE),
+        "reference_last_day_max_difference": last_day, "snapshot": str(args.snapshot),
+        "hour_contexts": args.hour_contexts, "code": git_state(), "created_utc": started.strftime("%Y-%m-%dT%H:%M:%S"),
     }, indent=2))
     with pd.option_context("display.width", 200, "display.max_rows", 500):
         print(summary.round(3).to_string(index=False))
