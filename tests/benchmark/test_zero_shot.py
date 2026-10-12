@@ -148,3 +148,29 @@ def test_chronos_bolt_cuts_contexts_at_2048_steps():
 
     assert params["model_context_length"] == 2048
     np.testing.assert_array_equal(full, cut)
+
+
+# TimesFM clips at 0 by default when a context is never negative (infer_is_positive); the adapter turns that off, so a
+# non-negative series that falls to 0 at the end may get negative low quantiles, as the other models' can.
+def test_timesfm_does_not_clip_non_negative_contexts():
+    forecaster, params = _named("timesfm25")
+    index = pd.date_range("2026-01-01", periods=7 * 96, freq="15min")
+    falling = pd.Series(np.maximum(0, 10 - np.arange(len(index)) * 10 / len(index)) + 2 * np.abs(np.sin(
+        np.arange(len(index)) * np.pi / 96)), index=index)
+
+    quantiles, _ = forecaster([falling], HORIZON, QUANTILE_LEVELS, 0)
+
+    assert params["infer_is_positive"] is False and params["fix_quantile_crossing"] is False
+    print(f"timesfm25: MIN q0.1 ON A NON-NEGATIVE CONTEXT = {quantiles[0, :, 0].min():.3g}")
+    assert quantiles[0, :, 0].min() < 0
+
+
+# The longest context TimesFM runs on (169 days = 16,224 steps) fits its limit and gives a full forecast.
+def test_timesfm_runs_the_169_day_context():
+    forecaster, params = _named("timesfm25")
+    context = _contexts(1, 169)[0]
+
+    quantiles, status = forecaster([context], HORIZON, QUANTILE_LEVELS, 0)
+
+    assert len(context) <= params["model_context_length"] == 16256
+    assert quantiles.shape == (1, *SHAPE) and status == ["ok"] and np.isfinite(quantiles).all()

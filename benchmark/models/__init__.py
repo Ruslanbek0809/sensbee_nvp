@@ -14,6 +14,7 @@ from typing import Callable, Optional
 from benchmark.models.autogluon_models import autogluon_forecaster
 from benchmark.models.chronos_models import chronos2_forecaster, chronos_bolt_forecaster
 from benchmark.models.statsforecast_models import mstl_forecaster
+from benchmark.models.timesfm_models import timesfm25_forecaster
 from benchmark.tasks import SEASON
 
 WEEK = 7 * SEASON
@@ -63,6 +64,9 @@ ZERO_SHOT: dict[str, Baseline] = {
     # Chronos-Bolt reads at most 2,048 steps: its 28-day context is cut to the last 21.3 days by the model.
     "chronos_bolt_base": Baseline(lambda: chronos_bolt_forecaster(*CHRONOS_BOLT_BASE), (1, 2, 7, 14, 28),
                                   (*CHRONOS_BOLT_BASE, "model.safetensors")),
+    # TimesFM 2.5 reads up to 16,256 steps next to its 128-step output block, so 169 days (16,224 steps) is its longest.
+    "timesfm25": Baseline(lambda: timesfm25_forecaster(*TIMESFM25), (1, 2, 7, 14, 28, 56, 85, 169),
+                          (*TIMESFM25, "model.safetensors")),
 }
 
 
