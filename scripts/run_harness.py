@@ -4,10 +4,10 @@
 # run. Otherwise one forecaster runs over the tasks and writes raw forecasts, metrics and a run manifest to a new
 # folder under --out, then the mean metrics per sensor, context and horizon are printed: an in-house check forecaster
 # (naive / seasonal naive; harness checks, not thesis baselines) or a baseline from benchmark/models (AutoGluon /
-# statsforecast; needs the bench venv), or a zero-shot foundation model (Chronos-2, Chronos-Bolt, TimesFM 2.5, TiRex;
-# bench venv plus their downloaded weights). A model runs on its own allowed context lengths unless --contexts picks
-# some of them. No network; reads only the snapshot (set HF_HUB_OFFLINE=1 so model weights come only from the local
-# cache).
+# statsforecast; needs the bench venv), or a zero-shot foundation model (Chronos-2, Chronos-Bolt, TimesFM 2.5, TiRex,
+# Toto; bench venv plus their downloaded weights). A model runs on its own allowed context lengths unless --contexts
+# picks some of them. No network; reads only the snapshot (set HF_HUB_OFFLINE=1 so model weights come only from the
+# local cache).
 #
 # Usage (from sensbee_nvp/):
 #   venv/bin/python scripts/run_harness.py --snapshot ../../benchmark_data/snapshots/sensbee-2026-10-01 --dry-run
@@ -19,6 +19,7 @@
 #   HF_HUB_OFFLINE=1 venv-bench/bin/python scripts/run_harness.py --snapshot <dir> --out <dir> --model chronos_bolt_base
 #   HF_HUB_OFFLINE=1 venv-bench/bin/python scripts/run_harness.py --snapshot <dir> --out <dir> --model timesfm25
 #   HF_HUB_OFFLINE=1 venv-bench/bin/python scripts/run_harness.py --snapshot <dir> --out <dir> --model tirex
+#   HF_HUB_OFFLINE=1 venv-bench/bin/python scripts/run_harness.py --snapshot <dir> --out <dir> --model toto
 
 import argparse
 import sys

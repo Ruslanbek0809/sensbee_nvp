@@ -16,6 +16,7 @@ from benchmark.models.chronos_models import chronos2_forecaster, chronos_bolt_fo
 from benchmark.models.statsforecast_models import mstl_forecaster
 from benchmark.models.timesfm_models import timesfm25_forecaster
 from benchmark.models.tirex_models import tirex_forecaster
+from benchmark.models.toto_models import toto_forecaster
 from benchmark.tasks import SEASON
 
 WEEK = 7 * SEASON
@@ -74,6 +75,8 @@ ZERO_SHOT: dict[str, Baseline] = {
     "timesfm25": _zero_shot(timesfm25_forecaster, TIMESFM25, (1, 2, 7, 14, 28, 56, 85, 169)),
     # TiRex reads at most 2,048 steps: its 28-day context is cut to the last 21.3 days by the model.
     "tirex": _zero_shot(tirex_forecaster, TIREX, (1, 2, 7, 14, 28), "model.ckpt"),
+    # Toto reads the last 4,096 steps (AutoGluon's default), more than the 2,688 of 28 days; it samples 256 paths.
+    "toto": _zero_shot(toto_forecaster, TOTO, (1, 2, 7, 14, 28)),
 }
 
 
