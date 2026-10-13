@@ -30,7 +30,8 @@ TIREX = ("NX-AI/TiRex", "63c740922493f5fbe60b277609ec62babfba2762")
 TOTO = ("Datadog/Toto-Open-Base-1.0", "0411ceb27bdf7fc3e4892e99edc8ad08192dc3c5")
 MOIRAI2_SMALL = ("Salesforce/moirai-2.0-R-small", "30f43ff08c8494f4943ae1521e9d4e94a0fbb389")
 PACKAGES = ("autogluon.timeseries", "statsforecast", "statsmodels", "scipy", "torch", "coreforecast", "joblib",
-            "chronos-forecasting", "transformers", "huggingface_hub", "accelerate", "timesfm", "tirex-ts", "uni2ts")
+            "chronos-forecasting", "transformers", "huggingface_hub", "accelerate", "timesfm", "tirex-ts", "uni2ts",
+            "jaxtyping")
 
 
 # One baseline: build() → (forecaster, parameters); contexts: the allowed context lengths in days; weights: for a
