@@ -3,6 +3,7 @@ venv/
 env/
 .venv/
 venv-bench/
+venv-moirai/
 
 # Python
 __pycache__/

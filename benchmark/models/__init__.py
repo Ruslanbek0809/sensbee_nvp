@@ -13,6 +13,7 @@ from typing import Callable, Optional
 
 from benchmark.models.autogluon_models import autogluon_forecaster
 from benchmark.models.chronos_models import chronos2_forecaster, chronos_bolt_forecaster
+from benchmark.models.moirai_models import moirai2_forecaster
 from benchmark.models.statsforecast_models import mstl_forecaster
 from benchmark.models.timesfm_models import timesfm25_forecaster
 from benchmark.models.tirex_models import tirex_forecaster
@@ -77,6 +78,8 @@ ZERO_SHOT: dict[str, Baseline] = {
     "tirex": _zero_shot(tirex_forecaster, TIREX, (1, 2, 7, 14, 28), "model.ckpt"),
     # Toto reads the last 4,096 steps (AutoGluon's default), more than the 2,688 of 28 days; it samples 256 paths.
     "toto": _zero_shot(toto_forecaster, TOTO, (1, 2, 7, 14, 28)),
+    # Moirai-2 reads up to 512 tokens of 16 steps, more than 28 days need; it runs only in venv-moirai (uni2ts).
+    "moirai2_small": _zero_shot(moirai2_forecaster, MOIRAI2_SMALL, (1, 2, 7, 14, 28)),
 }
 
 

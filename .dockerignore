@@ -1,5 +1,6 @@
 venv/
 venv-bench/
+venv-moirai/
 __pycache__/
 *.pyc
 .git/

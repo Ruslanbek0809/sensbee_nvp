@@ -1,0 +1,9 @@
+# Moirai-2 environment: the bench stack plus uni2ts, installed without its dependencies. uni2ts 2.0.0 declares
+# torch<2.5, numpy~=1.26 and scipy~=1.11, which don't install on Python 3.13 / macOS 27, so it runs outside its pins on
+# the bench venv's torch 2.10 / numpy 2.3. The extra packages are exactly what its inference import needed (2026-10-13):
+#   python3.13 -m venv venv-moirai && venv-moirai/bin/pip install -r requirements-bench.txt
+#   venv-moirai/bin/pip install --no-deps -r requirements-moirai.txt
+# Weights (Salesforce/moirai-2.0-R-small): CC-BY-NC-4.0, research only.
+uni2ts==2.0.0
+jaxtyping==0.2.38
+wadler_lindig==0.1.7
