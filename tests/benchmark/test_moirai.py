@@ -1,8 +1,7 @@
 # Tests specific to the Moirai-2 adapter (benchmark/models/moirai_models.py); the generic zero-shot checks are in
 # test_zero_shot.py. Run only in venv-moirai, where uni2ts is installed (skipped elsewhere):
 #   venv-moirai/bin/python -m pytest tests/benchmark/test_moirai.py -q
-#   HF_HUB_OFFLINE=1 venv-moirai/bin/python -m pytest tests/benchmark/test_moirai.py tests/benchmark/test_zero_shot.py \
-#       -m integration -k moirai -q -s
+#   HF_HUB_OFFLINE=1 venv-moirai/bin/python -m pytest tests/benchmark/test_zero_shot.py -m integration -k moirai -q -s
 
 import subprocess
 import sys
@@ -28,17 +27,3 @@ def test_moirai2_import_never_loads_the_dotenv_module():
 
     assert result.stdout.strip().splitlines()[-1] == "False"
 
-
-@pytest.mark.integration
-def test_moirai_refuses_contexts_of_different_lengths(make_contexts):
-    from huggingface_hub import try_to_load_from_cache
-
-    from benchmark.models import ZERO_SHOT
-    from benchmark.tasks import HORIZON, QUANTILE_LEVELS
-    model_id, revision, filename = ZERO_SHOT["moirai2_small"].weights
-    if not isinstance(try_to_load_from_cache(model_id, filename, revision=revision), str):
-        pytest.skip(f"{model_id} at {revision} is not in the local Hugging Face cache")
-    forecaster, _ = ZERO_SHOT["moirai2_small"].build()
-
-    with pytest.raises(ValueError, match="SAME LENGTH"):
-        forecaster([make_contexts(1, 7)[0], make_contexts(2, 2)[1]], HORIZON, QUANTILE_LEVELS, 0)

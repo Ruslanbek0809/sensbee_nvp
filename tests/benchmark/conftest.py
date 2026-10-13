@@ -1,5 +1,6 @@
-# Shared helpers for the benchmark tests, as fixtures: synthetic daily-periodic contexts, and the deciles of
-# AutoGluon's own wrapper for a model (the cross-check for the zero-shot adapters; needs the bench venv).
+# Shared helpers for the benchmark tests, as fixtures: synthetic daily-periodic contexts, the deciles of AutoGluon's own
+# wrapper for a model (the cross-check for the zero-shot adapters; needs the bench venv), and the zero-shot forecasters
+# built once per test session.
 
 from pathlib import Path
 
@@ -10,6 +11,7 @@ import pytest
 from benchmark.tasks import HORIZON, QUANTILE_LEVELS
 
 PATTERN = 10 + 5 * np.sin(np.arange(96) * 2 * np.pi / 96)
+BUILT: dict = {}
 
 
 # n daily-periodic contexts of `days` days with a little noise, each with its own noise and end time.
@@ -39,6 +41,24 @@ def _autogluon_deciles(model: str, hyperparameters: dict, contexts: list[pd.Seri
                      for i in range(len(contexts))])
 
 
+# The forecaster and parameters of one zero-shot model (benchmark/models ZERO_SHOT), built once per test session; skips
+# the test when the model's weights aren't in the local Hugging Face cache or its package is missing, so tests never
+# download anything.
+def _zero_shot(name: str) -> tuple:
+    from huggingface_hub import try_to_load_from_cache
+
+    from benchmark.models import ZERO_SHOT
+    model_id, revision, filename = ZERO_SHOT[name].weights
+    if not isinstance(try_to_load_from_cache(model_id, filename, revision=revision), str):
+        pytest.skip(f"{model_id} at {revision} is not in the local Hugging Face cache")
+    if name not in BUILT:
+        try:
+            BUILT[name] = ZERO_SHOT[name].build()
+        except ImportError as exc:
+            pytest.skip(f"{name}: {exc}")
+    return BUILT[name]
+
+
 # make_contexts(n, days): n synthetic contexts (see _contexts).
 @pytest.fixture
 def make_contexts():
@@ -49,3 +69,9 @@ def make_contexts():
 @pytest.fixture
 def autogluon_deciles():
     return _autogluon_deciles
+
+
+# zero_shot(name): (forecaster, parameters) of a zero-shot model, built once (see _zero_shot).
+@pytest.fixture
+def zero_shot():
+    return _zero_shot

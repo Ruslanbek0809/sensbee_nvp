@@ -15,35 +15,18 @@ import pytest
 pytestmark = pytest.mark.integration
 pytest.importorskip("torch")
 
-from huggingface_hub import try_to_load_from_cache  # noqa: E402
-
 from benchmark.models import ZERO_SHOT  # noqa: E402
 from benchmark.tasks import HORIZON, QUANTILE_LEVELS  # noqa: E402
 from src.data_access.data_loader import load_sensor_series_from_json  # noqa: E402
 
 FIXTURE = Path(__file__).resolve().parents[2] / "data" / "temp_14day_sensbee_data.json"
 SHAPE = (HORIZON, len(QUANTILE_LEVELS))
-BUILT: dict = {}
-
-
-# The forecaster and parameters of one zero-shot model, built once per test session; skips the test when the model's
-# weights aren't cached or its package is missing.
-def _built(name: str) -> tuple:
-    model_id, revision, filename = ZERO_SHOT[name].weights
-    if not isinstance(try_to_load_from_cache(model_id, filename, revision=revision), str):
-        pytest.skip(f"{model_id} at {revision} is not in the local Hugging Face cache")
-    if name not in BUILT:
-        try:
-            BUILT[name] = ZERO_SHOT[name].build()
-        except ImportError as exc:
-            pytest.skip(f"{name}: {exc}")
-    return BUILT[name]
 
 
 # (name, forecaster, parameters) of every zero-shot model in turn.
 @pytest.fixture(params=sorted(ZERO_SHOT))
-def model(request):
-    return request.param, *_built(request.param)
+def model(request, zero_shot):
+    return request.param, *zero_shot(request.param)
 
 
 def test_shape_independence_and_determinism(model, make_contexts):
@@ -91,8 +74,8 @@ def test_rp_temperature_fixture_smoke(model):
     print(f"{name}: CROSSED STEPS ON THE FIXTURE = {int(np.any(np.diff(quantiles, axis=-1) < 0, axis=-1).sum())}")
 
 
-def test_chronos_bolt_equals_autogluon_chronos(tmp_path, make_contexts, autogluon_deciles):
-    forecaster, _ = _built("chronos_bolt_base")
+def test_chronos_bolt_equals_autogluon_chronos(tmp_path, make_contexts, autogluon_deciles, zero_shot):
+    forecaster, _ = zero_shot("chronos_bolt_base")
     model_id, revision, _ = ZERO_SHOT["chronos_bolt_base"].weights
     contexts = make_contexts(3, 7)
 
@@ -107,8 +90,8 @@ def test_chronos_bolt_equals_autogluon_chronos(tmp_path, make_contexts, autogluo
 
 # Chronos-Bolt and TiRex read at most 2,048 steps, so a 28-day context gives the forecast of its last 2,048 steps.
 @pytest.mark.parametrize("name", ["chronos_bolt_base", "tirex"])
-def test_models_cut_contexts_at_2048_steps(name, make_contexts):
-    forecaster, params = _built(name)
+def test_models_cut_contexts_at_2048_steps(name, make_contexts, zero_shot):
+    forecaster, params = zero_shot(name)
     context = make_contexts(1, 28)[0]  # 2,688 steps
 
     full, _ = forecaster([context], HORIZON, QUANTILE_LEVELS, 0)
@@ -120,8 +103,8 @@ def test_models_cut_contexts_at_2048_steps(name, make_contexts):
 
 # TimesFM clips at 0 by default when a context is never negative (infer_is_positive); the adapter turns that off, so a
 # non-negative series that falls to 0 at the end may get negative low quantiles, as the other models' can.
-def test_timesfm_does_not_clip_non_negative_contexts():
-    forecaster, params = _built("timesfm25")
+def test_timesfm_does_not_clip_non_negative_contexts(zero_shot):
+    forecaster, params = zero_shot("timesfm25")
     index = pd.date_range("2026-01-01", periods=7 * 96, freq="15min")
     falling = pd.Series(np.maximum(0, 10 - np.arange(len(index)) * 10 / len(index)) + 2 * np.abs(np.sin(
         np.arange(len(index)) * np.pi / 96)), index=index)
@@ -134,8 +117,8 @@ def test_timesfm_does_not_clip_non_negative_contexts():
 
 
 # The longest context TimesFM runs on (169 days = 16,224 steps) fits its limit and gives a full forecast.
-def test_timesfm_runs_the_169_day_context(make_contexts):
-    forecaster, params = _built("timesfm25")
+def test_timesfm_runs_the_169_day_context(make_contexts, zero_shot):
+    forecaster, params = zero_shot("timesfm25")
     context = make_contexts(1, 169)[0]
 
     quantiles, status = forecaster([context], HORIZON, QUANTILE_LEVELS, 0)
@@ -146,9 +129,9 @@ def test_timesfm_runs_the_169_day_context(make_contexts):
 
 # Each TiRex call runs on one torch thread (so a forecast alone equals it in a batch) without frequency resampling;
 # the caller's thread count is restored afterwards.
-def test_tirex_runs_on_one_thread_and_restores_the_count(make_contexts):
+def test_tirex_runs_on_one_thread_and_restores_the_count(make_contexts, zero_shot):
     import torch
-    forecaster, params = _built("tirex")
+    forecaster, params = zero_shot("tirex")
     threads = torch.get_num_threads()
 
     forecaster(make_contexts(1, 7), HORIZON, QUANTILE_LEVELS, 0)

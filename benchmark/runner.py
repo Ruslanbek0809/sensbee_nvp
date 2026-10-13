@@ -6,9 +6,11 @@
 # Forecaster contract: f(contexts, horizon, levels, seed) -> (quantiles [n, horizon, levels], status per origin), with
 # status "ok" or "fallback" (the forecaster reports its own fallbacks). Batch items are independent: a forecast may use
 # only its own context, so no cross-series learning across origins, whose contexts hold earlier origins' targets.
-# Fitted models get training data only through tasks.training_series(). An origin is "failed" when the forecaster
-# raises (the runner then retries the origins one by one), returns the wrong shape, or returns NaN or inf. Crossing
-# quantiles are counted, then sorted for every model, so scores don't depend on which adapter sorts.
+# All contexts of one call have the same length: the runner splits a batch by length (only "all history" contexts
+# differ), so an adapter never has to pad. Fitted models get training data only through tasks.training_series(). An
+# origin is "failed" when the forecaster raises (the runner then retries the origins one by one), returns the wrong
+# shape, or returns NaN or inf. Crossing quantiles are counted, then sorted for every model, so scores don't depend on
+# which adapter sorts.
 
 import dataclasses
 import json
@@ -79,12 +81,23 @@ def _check(quantiles: np.ndarray, status: list[str]) -> tuple[np.ndarray, list[s
     return quantiles, status
 
 
-# Calls the forecaster on one batch and checks its output. On an exception or a malformed batch result it retries the
-# origins one by one, so one bad origin can't fail the whole batch. Returns quantiles [n, HORIZON, levels], NaN for
-# failed origins, and the status per origin ("ok", "fallback" or "failed").
+# Calls the forecaster on one batch and checks its output. Contexts of different lengths are forecast in one call per
+# length, in their original order within each. On an exception or a malformed batch result it retries the origins one
+# by one, so one bad origin can't fail the whole batch. Returns quantiles [n, HORIZON, levels], NaN for failed
+# origins, and the status per origin ("ok", "fallback" or "failed").
 def _predict(forecaster: Forecaster, contexts: list[pd.Series], levels: tuple[float, ...],
              seed: int) -> tuple[np.ndarray, list[str]]:
     n = len(contexts)
+    lengths = [len(c) for c in contexts]
+    if len(set(lengths)) > 1:
+        out = np.full((n, HORIZON, len(levels)), np.nan)
+        statuses = ["failed"] * n
+        for length in dict.fromkeys(lengths):
+            group = [i for i in range(n) if lengths[i] == length]
+            out[group], group_status = _predict(forecaster, [contexts[i] for i in group], levels, seed)
+            for i, status in zip(group, group_status):
+                statuses[i] = status
+        return out, statuses
     try:
         quantiles, status = forecaster(contexts, HORIZON, levels, seed)
         quantiles = np.array(quantiles, dtype=float)

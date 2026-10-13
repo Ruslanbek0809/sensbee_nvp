@@ -9,9 +9,9 @@ import numpy as np
 import pandas as pd
 import pytest
 
-from benchmark.runner import CHECK_FORECASTERS, naive_forecaster, run
+from benchmark.runner import CHECK_FORECASTERS, _predict, naive_forecaster, run
 from benchmark.snapshot import MANIFEST_NAME, sha256_file, write_raw_csv
-from benchmark.tasks import QUANTILE_LEVELS, SensorTask
+from benchmark.tasks import HORIZON, QUANTILE_LEVELS, SensorTask
 
 QUANTILE_COLUMNS = [f"q{level:g}" for level in QUANTILE_LEVELS]
 
@@ -182,3 +182,21 @@ def test_crossed_quantiles_are_counted_then_sorted(tmp_path):
     assert _record(run_dir)["counts"]["W"]["contexts"]["1d"]["crossed_steps"] == 13 * 96
     quantiles = pd.read_csv(run_dir / "forecasts.csv.gz")[QUANTILE_COLUMNS].to_numpy()
     assert (np.diff(quantiles, axis=1) > 0).all()
+
+
+
+# "All history" contexts differ in length per origin: the runner calls the forecaster once per length (in the original
+# order), so an adapter never sees mixed lengths, and the result equals the forecaster on the whole mixed batch.
+def test_contexts_of_different_lengths_are_forecast_one_length_per_call(make_contexts):
+    contexts = [make_contexts(1, 2)[0], make_contexts(2, 1)[1], make_contexts(3, 2)[2], make_contexts(1, 7)[0]]
+    calls = []
+
+    def recording(batch, horizon, levels, seed):
+        calls.append([len(c) for c in batch])
+        return naive_forecaster(batch, horizon, levels, seed)
+
+    quantiles, status = _predict(recording, contexts, QUANTILE_LEVELS, 0)
+    whole, _ = naive_forecaster(contexts, HORIZON, QUANTILE_LEVELS, 0)
+
+    assert calls == [[192, 192], [96], [672]] and status == ["ok"] * 4
+    np.testing.assert_array_equal(quantiles, whole)
