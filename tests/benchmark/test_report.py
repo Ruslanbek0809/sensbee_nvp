@@ -1,7 +1,8 @@
 # Tests for benchmark/report.py on tiny harness runs over a synthetic snapshot (no network): the files, the reference
 # against itself, refusal of mixed snapshots, point-only models without probabilistic metrics, failed origins left
 # unimputed, the negative-quantile share and the clipped visitor table on a hand example, the Diebold–Mariano sign,
-# and the common-origin report for a run on an origin subset. The report always runs the DM tests, which need statsmodels: these tests run in the bench venv only.
+# the common-origin report for a run on an origin subset, and for covariate runs (Phase 4) the skill per sensor group,
+# the DM tests against the values-only run, and the oracle section. The report always runs the DM tests, which need statsmodels: these tests run in the bench venv only.
 
 import json
 from pathlib import Path
@@ -185,3 +186,59 @@ def test_common_origins_score_every_model_on_the_subset_runs_origins(tmp_path):
     assert "**Origin stride:** subset evaluated" in (report / "summary.md").read_text()
     full_report = make_report([full, subset], tmp_path / "reports", ("snaive", 1), tasks=tasks, report_id="all")
     assert (pd.read_csv(full_report / "cells.csv").query("model == 'snaive'")["n_origins"] == 13).all()
+
+
+# Naive forecasts plus `shift`, for a covariate run (the windows are accepted and ignored).
+def _covariate_forecaster(shift: float):
+    def forecast(contexts, horizon, levels, seed, covariates):
+        quantiles, status = naive_forecaster(contexts, horizon, levels, seed)
+        return quantiles + shift, status
+    return forecast
+
+
+def test_group_skill_and_dm_against_the_values_only_run(tmp_path):
+    noise = np.random.default_rng(0).normal(0, 3, len(TIMES))
+    snapshot_dir, tasks = _snapshot(tmp_path, visitors=np.maximum((np.tile(PATTERN, len(TIMES) // 96) - 10) * 20
+                                                                  + noise, 0))
+    out = tmp_path / "runs"
+    runs = [run(seasonal_naive_forecaster(96), "snaive", snapshot_dir, out, tasks=tasks, context_days=(1,),
+                run_id="snaive"),
+            run(naive_forecaster, "naive", snapshot_dir, out, tasks=tasks, context_days=(1,), run_id="naive"),
+            run(_covariate_forecaster(0.5), "naive+cal", snapshot_dir, out, tasks={"V": tasks["V"]},
+                context_days=(1,), run_id="naive+cal", covariates="cal")]
+    report = make_report(runs, tmp_path / "reports", ("snaive", 1), tasks=tasks, report_id="r")
+
+    skill = pd.read_csv(report / "skill.csv").query("metric == 'MASE' and horizon_steps == 96").set_index(
+        ["model", "group"])
+    assert skill.loc[("naive", "main"), "n_sensors"] == 2
+    assert skill.loc[[("naive", g) for g in ("main", "halls", "weather")], "skill"].notna().all()
+    assert np.isnan(skill.loc[("naive+cal", "main"), "skill"])  # covers the halls only
+    assert skill.loc[("naive+cal", "halls"), "skill"] == pytest.approx(
+        1 - pd.read_csv(report / "relative.csv").query(
+            "metric == 'MASE' and horizon_steps == 96 and model == 'naive+cal'")["relative_error"].iloc[0])
+    dm = pd.read_csv(report / "dm_base.csv")
+    assert set(dm["model"]) == {"naive+cal"} and set(dm["base"]) == {"naive"} and set(dm["sensor"]) == {"V"}
+    assert (dm["n_origins"] == 13).all() and dm["statistic"].notna().all()
+    summary = (report / "summary.md").read_text()
+    assert "| naive+cal | 1d | halls |" in summary and "Oracle runs" not in summary
+
+
+def test_oracle_runs_get_their_own_section(tmp_path):
+    snapshot_dir = tmp_path / "snapshot"
+    w = np.tile(PATTERN, len(TIMES) // 96) + np.arange(len(TIMES)) * 0.001
+    raw = pd.DataFrame({"created_at": TIMES, "temperature": w, "humidity": 80.0, "global_radiation": 100.0,
+                        "pressure_rel": 1000.0, "wind_speed_avg": 2.0})
+    sha256 = write_raw_csv(raw, snapshot_dir / "raw" / "W.csv.gz")
+    (snapshot_dir / MANIFEST_NAME).write_text(json.dumps(
+        {"snapshot_id": "s", "sensors": {"W": {"file": "raw/W.csv.gz", "sha256": sha256}}}))
+    tasks = {"W": SensorTask("temperature", "AVG", "regular", "2026-02-01", "2026-02-05")}
+    out = tmp_path / "runs"
+    runs = [run(seasonal_naive_forecaster(96), "snaive", snapshot_dir, out, tasks=tasks, context_days=(1,),
+                run_id="snaive"),
+            run(_covariate_forecaster(0.0), "naive+met_oracle", snapshot_dir, out, tasks=tasks, context_days=(1,),
+                run_id="oracle", covariates="met_oracle")]
+    summary = (make_report(runs, tmp_path / "reports", ("snaive", 1), tasks=tasks, report_id="r")
+               / "summary.md").read_text()
+    main, oracle = summary.split("# Oracle runs")
+    assert "naive+met_oracle" not in main
+    assert "| naive+met_oracle | 1d |" in oracle

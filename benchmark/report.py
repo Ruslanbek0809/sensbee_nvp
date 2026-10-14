@@ -8,6 +8,10 @@
 # its relative error and DM test are left empty with a note. With common_origins, every table is built only on the
 # (sensor, origin) pairs that all runs evaluated, e.g. to compare a model run on an origin subset (origin_stride) with
 # the others on exactly its origins; failures.csv still counts each run's own origins.
+# Covariate runs (Phase 4) are named "<model>+<set>" and cover one sensor group, so the skill is also given per group
+# (halls, weather) next to the main 5-sensor skill; dm_base.csv tests each covariate run against its own values-only
+# run ("<model>") on the same origins and context; oracle runs (observed future covariates, run.json covariates.oracle)
+# are upper bounds and get their own section in summary.md, apart from every other model.
 
 import json
 import logging
@@ -114,31 +118,57 @@ def relative(metrics: pd.DataFrame, records: dict[str, dict], reference: tuple[s
     return pd.DataFrame(out)
 
 
-# Skill per model, context, horizon and metric: the clipped geometric mean of the relative errors over the main
-# sensors (parking is secondary), only for cells that have a relative error on every main sensor.
+# Sensor groups of the skill: all main sensors (parking is secondary), and the main halls and weather stations apart.
+def sensor_groups(tasks: dict[str, SensorTask]) -> dict[str, list[str]]:
+    main = {name: task for name, task in tasks.items() if not task.secondary}
+    groups = {"main": sorted(main),
+              "halls": sorted(name for name, task in main.items() if task.kind == "visitors"),
+              "weather": sorted(name for name, task in main.items() if task.kind == "regular")}
+    return {group: sensors for group, sensors in groups.items() if sensors}
+
+
+# Skill per model, context, horizon, metric and sensor group: the clipped geometric mean of the relative errors over
+# the group's sensors, only for cells that have a relative error on every sensor of the group.
 def skill(relative_table: pd.DataFrame, tasks: dict[str, SensorTask]) -> pd.DataFrame:
-    main = sorted(name for name, task in tasks.items() if not task.secondary)
     out = []
-    for (metric, h, model, context), cell in relative_table.groupby(
-            ["metric", "horizon_steps", "model", "context"], sort=False):
-        cell = cell[cell["sensor"].isin(main)]
-        complete = cell["relative_error"].notna().sum() == len(main)
-        row = {"metric": metric, "horizon_steps": h, "model": model, "context": context, "n_sensors": len(main)}
-        if complete:
-            result = relative_skill(cell[["model", "relative_error"]]).iloc[0]
-            out.append({**row, "gmean_relative_error": result["gmean_relative_error"], "skill": result["skill"],
-                        "note": ""})
-        else:
-            out.append({**row, "gmean_relative_error": np.nan, "skill": np.nan,
-                        "note": "not every main sensor has a paired relative error"})
+    for group, sensors in sensor_groups(tasks).items():
+        for (metric, h, model, context), cell in relative_table.groupby(
+                ["metric", "horizon_steps", "model", "context"], sort=False):
+            cell = cell[cell["sensor"].isin(sensors)]
+            complete = cell["relative_error"].notna().sum() == len(sensors)
+            row = {"metric": metric, "horizon_steps": h, "model": model, "context": context, "group": group,
+                   "n_sensors": len(sensors)}
+            if complete:
+                result = relative_skill(cell[["model", "relative_error"]]).iloc[0]
+                out.append({**row, "gmean_relative_error": result["gmean_relative_error"], "skill": result["skill"],
+                            "note": ""})
+            else:
+                out.append({**row, "gmean_relative_error": np.nan, "skill": np.nan,
+                            "note": f"not every {group} sensor has a paired relative error"})
     return pd.DataFrame(out)
+
+
+# One Diebold–Mariano row for a model's per-origin losses `a` against `b` (both indexed by origin), with `row` as its
+# labels; empty with a note when the origins don't pair, an origin failed, or the losses are identical.
+def _dm_row(a: pd.Series, b: pd.Series, row: dict) -> dict:
+    from statsmodels.tsa.api import diebold_mariano_test
+    if set(a.index) != set(b.index) or a.isna().any() or b.isna().any():
+        return {**row, "statistic": np.nan, "pvalue": np.nan, "lags": np.nan, "mean_loss_difference": np.nan,
+                "note": "unpaired or failed origins"}
+    b = b.loc[a.index]
+    if np.allclose(a.to_numpy(), b.to_numpy()):  # e.g. the same point forecast as the reference
+        return {**row, "statistic": np.nan, "pvalue": np.nan, "lags": np.nan,
+                "mean_loss_difference": float((a - b).mean()), "note": "identical losses"}
+    result = diebold_mariano_test(np.zeros(len(a)), a.to_numpy(), b.to_numpy(), criterion=lambda y, f: f,
+                                  horizon=DM_HORIZON, harvey_adj=True)
+    return {**row, "statistic": float(result.statistic), "pvalue": float(result.pvalue), "lags": int(result.lags),
+            "mean_loss_difference": float((a - b).mean()), "note": ""}
 
 
 # Diebold–Mariano test of a model against the reference on per-origin losses of one sensor (MAE, and QL for
 # probabilistic models), with Newey–West lags from horizon=DM_HORIZON and the Harvey small-sample correction. Negative
 # statistics mean the model's loss is lower. Needs statsmodels (bench venv).
 def dm_tests(metrics: pd.DataFrame, records: dict[str, dict], reference: tuple[str, int]) -> pd.DataFrame:
-    from statsmodels.tsa.api import diebold_mariano_test
     ref_model, ref_days = reference
     out = []
     for loss in ("MAE", "QL"):
@@ -152,21 +182,32 @@ def dm_tests(metrics: pd.DataFrame, records: dict[str, dict], reference: tuple[s
                 own = _rows(metrics, model, context, h, loss).set_index(["sensor", "origin"])[loss]
                 for sensor in sorted(own.index.get_level_values("sensor").unique()):
                     a, b = own.loc[sensor], ref.loc[sensor]
-                    row = {"loss": loss, "horizon_steps": h, "model": model, "context": context, "sensor": sensor,
-                           "n_origins": len(a)}
-                    if set(a.index) != set(b.index) or a.isna().any() or b.isna().any():
-                        out.append({**row, "statistic": np.nan, "pvalue": np.nan, "lags": np.nan,
-                                    "mean_loss_difference": np.nan, "note": "unpaired or failed origins"})
-                        continue
-                    b = b.loc[a.index]
-                    if np.allclose(a.to_numpy(), b.to_numpy()):  # e.g. the same point forecast as the reference
-                        out.append({**row, "statistic": np.nan, "pvalue": np.nan, "lags": np.nan,
-                                    "mean_loss_difference": float((a - b).mean()), "note": "identical losses"})
-                        continue
-                    result =diebold_mariano_test(np.zeros(len(a)), a.to_numpy(), b.to_numpy(),
-                                                  criterion=lambda y, f: f, horizon=DM_HORIZON, harvey_adj=True)
-                    out.append({**row, "statistic": float(result.statistic), "pvalue": float(result.pvalue),
-                                "lags": int(result.lags), "mean_loss_difference": float((a - b).mean()), "note": ""})
+                    out.append(_dm_row(a, b, {"loss": loss, "horizon_steps": h, "model": model, "context": context,
+                                              "sensor": sensor, "n_origins": len(a)}))
+    return pd.DataFrame(out)
+
+
+# Diebold–Mariano tests of each covariate run "<model>+<set>" against its values-only run "<model>" (when both are in
+# the report) at the same context, per sensor, loss and horizon. Negative statistics mean the covariates lower the loss.
+def dm_base(metrics: pd.DataFrame, records: dict[str, dict]) -> pd.DataFrame:
+    out = []
+    for model in records:
+        base = model.split("+")[0]
+        if "+" not in model or base not in records:
+            continue
+        for loss in ("MAE", "QL"):
+            if loss == "QL" and (_point_only(records[model]) or _point_only(records[base])):
+                continue
+            for h in REPORT_STEPS:
+                for context in metrics.loc[metrics["model"] == model, "context"].unique():
+                    own = _rows(metrics, model, context, h, loss).set_index(["sensor", "origin"])[loss]
+                    ref = _rows(metrics, base, context, h, loss).set_index(["sensor", "origin"])[loss]
+                    for sensor in sorted(own.index.get_level_values("sensor").unique()):
+                        if sensor not in ref.index.get_level_values("sensor"):
+                            continue
+                        a, b = own.loc[sensor], ref.loc[sensor]
+                        out.append(_dm_row(a, b, {"loss": loss, "horizon_steps": h, "model": model, "base": base,
+                                                  "context": context, "sensor": sensor, "n_origins": len(a)}))
     return pd.DataFrame(out)
 
 
@@ -237,7 +278,27 @@ def _context_order(column: pd.Series) -> pd.Series:
     return column.map(lambda c: float("inf") if c == "all" else int(c.rstrip("d")))
 
 
-# Headline tables: MASE and SQL per sensor and model at 24 h for each context, and the skill per model and context.
+# True if the run used oracle covariates (observed future values).
+def _oracle(record: dict) -> bool:
+    return bool((record.get("covariates") or {}).get("oracle", False))
+
+
+# MASE and SQL per sensor and model at 24 h for each context (only cells that ran), under the given heading prefix.
+def _metric_tables(cell_table: pd.DataFrame, title: str) -> list[str]:
+    h = max(REPORT_STEPS)
+    parts = []
+    for metric in ("MASE", "SQL"):
+        at_h = cell_table[cell_table["horizon_steps"] == h]
+        table = at_h.pivot(index=["model", "context"], columns="sensor", values=metric)  # only cells that ran
+        table["n_origins_total"] = at_h.groupby(["model", "context"])["n_origins"].sum().astype(int)
+        table = table.reset_index()
+        table = table.sort_values(["model", "context"], key=_context_order, ignore_index=True)
+        parts.append(f"## {title}{metric} at {h} steps (24 h), mean over origins\n\n{_markdown(table)}\n")
+    return parts
+
+
+# Headline tables: MASE and SQL per sensor and model at 24 h for each context, the skill per model, context and sensor
+# group (groups where it exists, and always the main group), and the oracle runs in their own section.
 def summary_markdown(cell_table: pd.DataFrame, skill_table: pd.DataFrame, records: dict[str, dict],
                      reference: tuple[str, int], common: Optional[int] = None) -> str:
     first = next(iter(records.values()))
@@ -253,18 +314,19 @@ def summary_markdown(cell_table: pd.DataFrame, skill_table: pd.DataFrame, record
         parts.append(f"**Common origins only:** every table uses the {common} (sensor, origin) pairs that all runs "
                      "evaluated; sensors missing from any run are left out, so the skill may be n/a.\n")
     h = max(REPORT_STEPS)
+    oracle = sorted(m for m, r in records.items() if _oracle(r))
+    parts += _metric_tables(cell_table[~cell_table["model"].isin(oracle)], "")
     for metric in ("MASE", "SQL"):
-        at_h = cell_table[cell_table["horizon_steps"] == h]
-        table = at_h.pivot(index=["model", "context"], columns="sensor", values=metric)  # only cells that ran
-        table["n_origins_total"] = at_h.groupby(["model", "context"])["n_origins"].sum().astype(int)
-        table = table.reset_index()
-        table = table.sort_values(["model", "context"], key=_context_order, ignore_index=True)
-        parts.append(f"## {metric} at {h} steps (24 h), mean over origins\n\n{_markdown(table)}\n")
-    for metric in ("MASE", "SQL"):
-        table = skill_table[(skill_table["metric"] == metric) & (skill_table["horizon_steps"] == h)].sort_values(
-            ["model", "context"], key=_context_order)
-        parts.append(f"## Skill on {metric} at 24 h (1 − gmean of relative errors over the main sensors)\n\n"
-                     f"{_markdown(table[['model', 'context', 'gmean_relative_error', 'skill', 'note']])}\n")
+        table = skill_table[(skill_table["metric"] == metric) & (skill_table["horizon_steps"] == h)
+                            & ~skill_table["model"].isin(oracle)
+                            & ((skill_table["group"] == "main") | skill_table["skill"].notna())].sort_values(
+            ["model", "context", "group"], key=_context_order)
+        parts.append(f"## Skill on {metric} at 24 h (1 − gmean of relative errors over the group's sensors)\n\n"
+                     f"{_markdown(table[['model', 'context', 'group', 'gmean_relative_error', 'skill', 'note']])}\n")
+    if oracle:
+        parts.append(f"# Oracle runs (upper bounds: observed future covariates)\n\n{', '.join(oracle)}. Not "
+                     "comparable with the tables above as forecasts; they bound what perfect covariates could give.\n")
+        parts += _metric_tables(cell_table[cell_table["model"].isin(oracle)], "Oracle: ")
     return "\n".join(parts)
 
 
@@ -287,6 +349,7 @@ def make_report(run_dirs: list[Path], out_root: Path, reference: tuple[str, int]
     relative_table = relative(metrics, records, reference)
     skill_table = skill(relative_table, tasks)
     dm_table = dm_tests(metrics, records, reference)
+    dm_base_table = dm_base(metrics, records)
     negative, clipped = forecast_tables(records, metrics, tasks, keep)
     cell_table = cell_table.merge(negative, on=KEYS, how="left")
     report_dir.mkdir(parents=True)
@@ -294,6 +357,7 @@ def make_report(run_dirs: list[Path], out_root: Path, reference: tuple[str, int]
     relative_table.to_csv(report_dir / "relative.csv", index=False)
     skill_table.to_csv(report_dir / "skill.csv", index=False)
     dm_table.to_csv(report_dir / "dm.csv", index=False)
+    dm_base_table.to_csv(report_dir / "dm_base.csv", index=False)
     clipped.to_csv(report_dir / "clipped_visitors.csv", index=False)
     failures(records).to_csv(report_dir / "failures.csv", index=False)
     n_common = None if keep is None else len(keep)

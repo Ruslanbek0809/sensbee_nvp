@@ -8,7 +8,9 @@
 # Toto; bench venv plus their downloaded weights; Moirai-2 in venv-moirai), a trained model (fitted per sensor on
 # the data before the period; bench venv), or LLMTime with a local LLM (bench venv plus its weights). A model runs on its own allowed context lengths unless --contexts picks
 # some of them; --origin-stride k evaluates every k-th valid origin. No network; reads only the snapshot (set
-# HF_HUB_OFFLINE=1 so model weights come only from the local cache).
+# HF_HUB_OFFLINE=1 so model weights come only from the local cache). --covariates <set> (benchmark/covariates.py) runs
+# a model that accepts the set's covariate kinds on sensors of the set's kind; the run's model name becomes
+# "<model>+<set>".
 #
 # Usage (from sensbee_nvp/):
 #   venv/bin/python scripts/run_harness.py --snapshot ../../benchmark_data/snapshots/sensbee-2026-10-01 --dry-run
@@ -36,6 +38,7 @@ import pandas as pd
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(PROJECT_ROOT))
 
+from benchmark.covariates import COVARIATE_SETS  # noqa: E402
 from benchmark.metrics import METRICS  # noqa: E402
 from benchmark.models import BASELINES, LLMTIME, TRAINED, ZERO_SHOT, library_versions  # noqa: E402
 from benchmark.runner import CHECK_FORECASTERS, run  # noqa: E402
@@ -97,6 +100,8 @@ def main() -> None:
                              "(default: all of CONTEXT_DAYS, or a model's allowed lengths)")
     parser.add_argument("--seed", type=int, default=0)
     parser.add_argument("--origin-stride", type=int, default=1, help="evaluate every k-th valid origin (default 1)")
+    parser.add_argument("--covariates", choices=list(COVARIATE_SETS),
+                        help="covariate set (only for models that accept its kinds, on sensors of its kind)")
     args = parser.parse_args()
     requested = None if args.contexts is None else tuple(None if c == "all" else int(c) for c in args.contexts)
 
@@ -107,6 +112,17 @@ def main() -> None:
         parser.error("--out and --model are required unless --dry-run")
     model_info, forecaster, trainer = {}, None, None
     models = {**BASELINES, **ZERO_SHOT, **TRAINED, **LLMTIME}
+    name = args.model
+    if args.covariates is not None:
+        spec = COVARIATE_SETS[args.covariates]
+        accepted = models[args.model].covariate_kinds if args.model in models else ()
+        if not set(spec.column_kinds) <= set(accepted):
+            parser.error(f"{args.model} accepts covariate kinds {list(accepted)}, the set {args.covariates} needs "
+                         f"{list(spec.column_kinds)}")
+        wrong = [sensor for sensor in args.sensors if TASKS[sensor].kind != spec.kind]
+        if wrong:
+            parser.error(f"the set {args.covariates} is for {spec.kind} sensors; pick --sensors without {wrong}")
+        name = f"{args.model}+{args.covariates}"
     if args.model in models:
         baseline = models[args.model]
         contexts = baseline.contexts if requested is None else requested
@@ -121,9 +137,10 @@ def main() -> None:
     else:
         forecaster, params = CHECK_FORECASTERS[args.model]
         contexts = requested or CONTEXT_DAYS
-    run_dir = run(forecaster, args.model, args.snapshot, args.out, tasks={name: TASKS[name] for name in args.sensors},
+    run_dir = run(forecaster, name, args.snapshot, args.out, tasks={sensor: TASKS[sensor] for sensor in args.sensors},
                   period=args.period, context_days=contexts, seed=args.seed, model_params=params,
-                  model_info=model_info, trainer=trainer, origin_stride=args.origin_stride)
+                  model_info=model_info, trainer=trainer, origin_stride=args.origin_stride,
+                  covariates=args.covariates)
     with pd.option_context("display.width", 200, "display.max_rows", 500):
         print(summarize(run_dir).round(4).to_string())
     print(f"RUN WRITTEN to {run_dir}", file=sys.stderr)

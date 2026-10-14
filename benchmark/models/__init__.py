@@ -43,13 +43,15 @@ PACKAGES = ("autogluon.timeseries", "statsforecast", "statsmodels", "scipy", "to
 
 # One baseline: build() → (forecaster, parameters), or (trainer, parameters) when trained; contexts: the allowed
 # context lengths in days; weights: for a zero-shot model, (model id, revision, weight file name) in the Hugging Face
-# cache; trained: build() returns a trainer, fitted per sensor by the runner.
+# cache; trained: build() returns a trainer, fitted per sensor by the runner; covariate_kinds: the covariate kinds
+# (benchmark/covariates.py) its forecaster or trainer accepts, none by default.
 @dataclass(frozen=True)
 class Baseline:
     build: Callable
     contexts: tuple[int, ...]
     weights: Optional[tuple[str, str, str]] = None
     trained: bool = False
+    covariate_kinds: tuple[str, ...] = ()
 
 
 # AutoGluon SeasonalNaive uses its seasonal branch only when the context has more than m + 1 steps, otherwise it

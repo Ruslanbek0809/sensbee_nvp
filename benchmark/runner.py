@@ -19,6 +19,10 @@
 # origin_stride=k keeps every k-th valid origin per sensor (a fixed subset for expensive models).
 # A forecaster may have a drain_diagnostics() method returning plain counts (e.g. LLMTime's filtered samples) and
 # resetting them: the runner calls it after each sensor and records the result in counts[sensor]["diagnostics"].
+# Covariates (Phase 4): with covariates=<set name> (benchmark/covariates.py), the forecaster is called with
+# covariates=[one DataFrame per context: its timestamps plus the HORIZON steps from the origin], built only by
+# covariates.covariate_window(), which hides the future of past-only columns; a trainer is called with
+# covariates=<the known columns before the cutoff>. Without covariates the calls are unchanged.
 
 import dataclasses
 import json
@@ -33,6 +37,7 @@ from typing import Callable, Optional
 import numpy as np
 import pandas as pd
 
+from benchmark import covariates as cov
 from benchmark.metrics import METRICS, seasonal_scale, window_metrics
 from benchmark.snapshot import (
     BUCKET_FREQ, BUCKETS_PER_DAY, MANIFEST_NAME, TIME_FORMAT, git_state, load_snapshot, sha256_file, write_raw_csv,
@@ -91,12 +96,20 @@ def _check(quantiles: np.ndarray, status: list[str]) -> tuple[np.ndarray, list[s
     return quantiles, status
 
 
+# Calls the forecaster on contexts, with their covariate windows only when the run has covariates.
+def _call(forecaster: Forecaster, contexts: list[pd.Series], levels: tuple[float, ...], seed: int,
+          covariates: Optional[list[pd.DataFrame]]) -> tuple[np.ndarray, list[str]]:
+    if covariates is None:
+        return forecaster(contexts, HORIZON, levels, seed)
+    return forecaster(contexts, HORIZON, levels, seed, covariates=covariates)
+
+
 # Calls the forecaster on one batch and checks its output. Contexts of different lengths are forecast in one call per
-# length, in their original order within each. On an exception or a malformed batch result it retries the origins one
-# by one, so one bad origin can't fail the whole batch. Returns quantiles [n, HORIZON, levels], NaN for failed
-# origins, and the status per origin ("ok", "fallback" or "failed").
-def _predict(forecaster: Forecaster, contexts: list[pd.Series], levels: tuple[float, ...],
-             seed: int) -> tuple[np.ndarray, list[str]]:
+# length, in their original order within each; covariate windows stay paired with their contexts. On an exception or
+# a malformed batch result it retries the origins one by one, so one bad origin can't fail the whole batch. Returns
+# quantiles [n, HORIZON, levels], NaN for failed origins, and the status per origin ("ok", "fallback" or "failed").
+def _predict(forecaster: Forecaster, contexts: list[pd.Series], levels: tuple[float, ...], seed: int,
+             covariates: Optional[list[pd.DataFrame]] = None) -> tuple[np.ndarray, list[str]]:
     n = len(contexts)
     lengths = [len(c) for c in contexts]
     if len(set(lengths)) > 1:
@@ -104,12 +117,13 @@ def _predict(forecaster: Forecaster, contexts: list[pd.Series], levels: tuple[fl
         statuses = ["failed"] * n
         for length in dict.fromkeys(lengths):
             group = [i for i in range(n) if lengths[i] == length]
-            out[group], group_status = _predict(forecaster, [contexts[i] for i in group], levels, seed)
+            out[group], group_status = _predict(forecaster, [contexts[i] for i in group], levels, seed,
+                                                None if covariates is None else [covariates[i] for i in group])
             for i, status in zip(group, group_status):
                 statuses[i] = status
         return out, statuses
     try:
-        quantiles, status = forecaster(contexts, HORIZON, levels, seed)
+        quantiles, status = _call(forecaster, contexts, levels, seed, covariates)
         quantiles = np.array(quantiles, dtype=float)
         if quantiles.shape == (n, HORIZON, len(levels)) and len(status) == n:
             return _check(quantiles, list(status))
@@ -120,7 +134,8 @@ def _predict(forecaster: Forecaster, contexts: list[pd.Series], levels: tuple[fl
     statuses = ["failed"] * n
     for i, context in enumerate(contexts):
         try:
-            quantiles, status = forecaster([context], HORIZON, levels, seed)
+            quantiles, status = _call(forecaster, [context], levels, seed,
+                                      None if covariates is None else [covariates[i]])
             quantiles = np.array(quantiles, dtype=float)
             if quantiles.shape == (1, HORIZON, len(levels)) and len(status) == 1:
                 quantiles, status = _check(quantiles, list(status))
@@ -158,18 +173,22 @@ def _plain_json(value: object) -> object:
     return json.loads(json.dumps(value, default=plain))
 
 
-# Fits one sensor's model with the trainer on the training items before the cutoff. Returns the forecaster (None when
-# the trainer raised or returned fit info that isn't JSON, checked now rather than when run.json is written after all
-# the forecasts) and the fit record for run.json: cutoff, items, steps, span, fit seconds and the trainer's info.
+# Fits one sensor's model with the trainer on the training items before the cutoff (and the known covariates before
+# it, in a covariate run). Returns the forecaster (None when the trainer raised or returned fit info that isn't JSON,
+# checked now rather than when run.json is written after all the forecasts) and the fit record for run.json: cutoff,
+# items, steps, span, fit seconds and the trainer's info.
 def _fit(trainer: Trainer, sensor: str, series: pd.Series, task: SensorTask, cutoff: pd.Timestamp,
-         seed: int) -> tuple[Optional[Forecaster], dict]:
+         seed: int, covariates: Optional[pd.DataFrame] = None) -> tuple[Optional[Forecaster], dict]:
     items = training_items(series, task, cutoff)
     record = {"cutoff": cutoff.strftime(TIME_FORMAT), "items": len(items), "steps": int(sum(len(i) for i in items)),
               "first": items[0].index[0].strftime(TIME_FORMAT) if items else None,
               "last": items[-1].index[-1].strftime(TIME_FORMAT) if items else None}
     started = time.perf_counter()
     try:
-        forecaster, info = trainer(sensor, items, seed)
+        if covariates is None:
+            forecaster, info = trainer(sensor, items, seed)
+        else:
+            forecaster, info = trainer(sensor, items, seed, covariates=covariates)
         info = _plain_json(info)
     except Exception as exc:
         logger.warning(f"FIT FAILED for {sensor} ({type(exc).__name__}: {exc}); ALL ITS ORIGINS FAIL")
@@ -181,18 +200,23 @@ def _fit(trainer: Trainer, sensor: str, series: pd.Series, task: SensorTask, cut
 # one period and context lengths (days; None = all history before the origin), and writes the results to
 # out_root/<run_id>. run_id defaults to "<UTC start time>_<model>". Origin validity covers CONTEXT_DAYS plus the run's
 # own context lengths, so a longer context is checked too; with the default contexts the origins are the same as
-# before. origin_stride=k evaluates every k-th valid origin. Raises FileExistsError if that folder exists. Returns the
-# run folder.
+# before. origin_stride=k evaluates every k-th valid origin. covariates: a covariate set name (see the header); every
+# task must be of the set's kind. Raises FileExistsError if that folder exists. Returns the run folder.
 def run(forecaster: Optional[Forecaster], model: str, snapshot_dir: Path, out_root: Path,
         tasks: Optional[dict[str, SensorTask]] = None, period: str = "test",
         context_days: tuple[Optional[int], ...] = CONTEXT_DAYS, seed: int = 0, run_id: Optional[str] = None,
         model_params: Optional[dict] = None, model_info: Optional[dict] = None, trainer: Optional[Trainer] = None,
-        origin_stride: int = 1) -> Path:
+        origin_stride: int = 1, covariates: Optional[str] = None) -> Path:
     if (forecaster is None) == (trainer is None):
         raise ValueError("GIVE EITHER A FORECASTER OR A TRAINER")
     if origin_stride < 1:
         raise ValueError(f"ORIGIN STRIDE {origin_stride} MUST BE AT LEAST 1")
     tasks = TASKS if tasks is None else tasks
+    if covariates is not None:
+        spec = cov.COVARIATE_SETS[covariates]
+        wrong = sorted(sensor for sensor, task in tasks.items() if task.kind != spec.kind)
+        if wrong:
+            raise ValueError(f"COVARIATE SET {covariates} IS FOR {spec.kind} SENSORS, NOT {wrong}")
     started = datetime.now(timezone.utc)
     code = git_state()  # at the start: the code that runs, even if a commit happens during a long run
     run_dir = Path(out_root) / (run_id or f"{started:%Y-%m-%dT%H%M%SZ}_{model}")
@@ -216,16 +240,26 @@ def run(forecaster: Optional[Forecaster], model: str, snapshot_dir: Path, out_ro
         counts[sensor] = {"candidates": len(table), "valid": len(valid), "evaluated": len(origins),
                           "reasons": {reason: int(n) for reason, n in table["reason"].value_counts().items()},
                           "undefined_scale": int(np.isnan(scales).sum()), "contexts": {}}
+        start, end = period_bounds(task, period)
+        frame, kinds = None, {}
+        if covariates is not None:
+            frame, kinds, info = cov.build(covariates, sensor, frames, series, task, start)
+            longest = pd.Timedelta(days=max(validity_context_days(context_days)))
+            counts[sensor]["covariates"] = {"columns": kinds,
+                                            "coverage": cov.coverage(frame, kinds, start - longest, end), **info}
         sensor_forecaster = forecaster
         if trainer is not None and origins:
-            sensor_forecaster, counts[sensor]["fit"] = _fit(trainer, sensor, series, task,
-                                                            period_bounds(task, period)[0], seed)
+            sensor_forecaster, counts[sensor]["fit"] = _fit(
+                trainer, sensor, series, task, start, seed,
+                None if frame is None else cov.training_covariates(frame, kinds, start))
         for days in context_days:
             label = "all" if days is None else f"{days}d"
             contexts = [context_window(series, origin, None if days is None else days * BUCKETS_PER_DAY)
                         for origin in origins]
+            windows = None if frame is None else [cov.covariate_window(frame, kinds, origin, context.index)
+                                                  for origin, context in zip(origins, contexts)]
             if sensor_forecaster is not None and origins:
-                quantiles, status = _predict(sensor_forecaster, contexts, levels, seed)
+                quantiles, status = _predict(sensor_forecaster, contexts, levels, seed, windows)
             else:  # the fit failed, or nothing to forecast
                 quantiles, status = np.full((len(origins), HORIZON, len(levels)), np.nan), ["failed"] * len(origins)
             crossed = int(np.any(np.diff(quantiles, axis=-1) < 0, axis=-1).sum())
@@ -264,6 +298,9 @@ def run(forecaster: Optional[Forecaster], model: str, snapshot_dir: Path, out_ro
         "validity_context_days": list(validity_context_days(context_days)),
         "origin_stride": origin_stride,
         "trained": trainer is not None,
+        "covariates": None if covariates is None else {
+            "set": covariates, "kind": cov.COVARIATE_SETS[covariates].kind,
+            "groups": list(cov.COVARIATE_SETS[covariates].groups), "oracle": cov.COVARIATE_SETS[covariates].oracle},
         "settings": {
             "horizon": HORIZON, "report_steps": list(REPORT_STEPS), "quantile_levels": list(levels),
             "origin_freq": ORIGIN_FREQ, "guard_hours": GUARD / pd.Timedelta("1h"),
