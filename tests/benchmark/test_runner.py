@@ -280,3 +280,19 @@ def test_run_needs_exactly_one_of_forecaster_and_trainer_and_a_positive_stride(t
         run(naive_forecaster, "x", snapshot_dir, tmp_path / "b", tasks=tasks, trainer=_recording_trainer([]))
     with pytest.raises(ValueError, match="STRIDE"):
         run(naive_forecaster, "x", snapshot_dir, tmp_path / "c", tasks=tasks, origin_stride=0)
+
+
+def test_fit_info_is_made_plain_json_or_fails_the_fit_at_once(tmp_path):
+    snapshot_dir, tasks = _snapshot(tmp_path)
+
+    def numpy_info(sensor, items, seed):
+        return naive_forecaster, {"epochs": np.int64(7), "loss": np.float32(0.5)}
+
+    def bad_info(sensor, items, seed):
+        return naive_forecaster, {"model": object()}
+
+    good = _record(run(None, "a", snapshot_dir, tmp_path / "a", tasks=tasks, context_days=(1,), trainer=numpy_info))
+    assert good["counts"]["W"]["fit"]["epochs"] == 7 and good["counts"]["W"]["fit"]["loss"] == 0.5
+    bad = _record(run(None, "b", snapshot_dir, tmp_path / "b", tasks=tasks, context_days=(1,), trainer=bad_info))
+    assert "NOT JSON" in bad["counts"]["W"]["fit"]["error"]
+    assert bad["counts"]["W"]["contexts"]["1d"]["failed"] == 13

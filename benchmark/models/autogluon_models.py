@@ -28,10 +28,10 @@ def physical_cores() -> int:
     return joblib.cpu_count(only_physical_cores=True)
 
 
-# One TimeSeriesDataFrame with one item per context; item ids keep the batch order.
-def _batch_frame(contexts: list[pd.Series]):
+# One TimeSeriesDataFrame with one item per context; item ids ("<prefix>000000", ...) keep the batch order.
+def _batch_frame(contexts: list[pd.Series], prefix: str = ""):
     from autogluon.timeseries import TimeSeriesDataFrame
-    frames = [pd.DataFrame({"item_id": f"{i:06d}", "timestamp": c.index, "target": c.to_numpy(dtype=float)})
+    frames = [pd.DataFrame({"item_id": f"{prefix}{i:06d}", "timestamp": c.index, "target": c.to_numpy(dtype=float)})
               for i, c in enumerate(contexts)]
     return TimeSeriesDataFrame.from_data_frame(pd.concat(frames, ignore_index=True))
 

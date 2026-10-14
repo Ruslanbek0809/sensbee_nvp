@@ -182,5 +182,6 @@ def test_common_origins_score_every_model_on_the_subset_runs_origins(tmp_path):
     assert (failures["valid_origins"] == 13).all() and (failures["evaluated_origins"] == 4).all()
     assert (failures[["ok", "fallback", "failed"]].sum(axis=1) == failures["evaluated_origins"]).all()
     assert "Common origins only" in (report / "summary.md").read_text()
+    assert "**Origin stride:** subset evaluated" in (report / "summary.md").read_text()
     full_report = make_report([full, subset], tmp_path / "reports", ("snaive", 1), tasks=tasks, report_id="all")
     assert (pd.read_csv(full_report / "cells.csv").query("model == 'snaive'")["n_origins"] == 13).all()

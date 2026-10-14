@@ -14,7 +14,8 @@
 # Trained models: instead of a forecaster, run() takes a trainer(sensor, items, seed) -> (forecaster, fit info), called
 # once per sensor with tasks.training_items() before the start of the run's period (the cutoff), so a fitted model
 # never sees data at or after the period start; the forecaster it returns is then used for every origin and context
-# of that sensor (one frozen model per sensor and period). A trainer that raises fails all origins of that sensor.
+# of that sensor (one frozen model per sensor and period). A trainer that raises, or whose fit info isn't plain JSON
+# (numpy scalars are converted), fails all origins of that sensor.
 # origin_stride=k keeps every k-th valid origin per sensor (a fixed subset for expensive models).
 
 import dataclasses
@@ -145,8 +146,16 @@ def _forecast_frame(sensor: str, context: str, origins: list[pd.Timestamp], stat
     })
 
 
+# JSON fallback for a trainer's fit info: numpy scalars become Python numbers, anything else is refused.
+def _plain(value: object) -> object:
+    if isinstance(value, np.generic):
+        return value.item()
+    raise TypeError(f"FIT INFO VALUE OF TYPE {type(value).__name__} IS NOT JSON")
+
+
 # Fits one sensor's model with the trainer on the training items before the cutoff. Returns the forecaster (None when
-# the trainer raised) and the fit record for run.json: cutoff, items, steps, span, fit seconds and the trainer's info.
+# the trainer raised or returned fit info that isn't JSON, checked now rather than when run.json is written after all
+# the forecasts) and the fit record for run.json: cutoff, items, steps, span, fit seconds and the trainer's info.
 def _fit(trainer: Trainer, sensor: str, series: pd.Series, task: SensorTask, cutoff: pd.Timestamp,
          seed: int) -> tuple[Optional[Forecaster], dict]:
     items = training_items(series, task, cutoff)
@@ -156,6 +165,7 @@ def _fit(trainer: Trainer, sensor: str, series: pd.Series, task: SensorTask, cut
     started = time.perf_counter()
     try:
         forecaster, info = trainer(sensor, items, seed)
+        info = json.loads(json.dumps(info, default=_plain))
     except Exception as exc:
         logger.warning(f"FIT FAILED for {sensor} ({type(exc).__name__}: {exc}); ALL ITS ORIGINS FAIL")
         forecaster, info = None, {"error": f"{type(exc).__name__}: {exc}"}
