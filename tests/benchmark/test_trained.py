@@ -2,8 +2,11 @@
 # is one AutoGluon accepts, the fitted models use no date features and the capped lags, the input window fits the
 # 14-day context, DirectTabular trained on quantiles, no context sharing an id with a training item, output shape and
 # finite values, batch independence, RecursiveTabular as a point forecaster, the same seed giving the same forecasts,
-# and no silent fit without training data or when AutoGluon skips the model. Run only where AutoGluon is installed (the
-# bench venv).
+# and no silent fit without training data or when AutoGluon skips the model. DeepAR: the fitted network has no time
+# features and the capped lags, early stopping gets the final days as tuning data, the same seed gives the same
+# forecasts, and the distribution the network computes from a context doesn't depend on the other contexts in the
+# batch (its sampled paths do, through torch's Student-t sampler, whose random draws depend on every element's degrees
+# of freedom); these use 2 short epochs (same network). Run only where AutoGluon is installed (the bench venv).
 
 import numpy as np
 import pandas as pd
@@ -12,21 +15,25 @@ import pytest
 pytest.importorskip("autogluon.timeseries")
 
 from benchmark.models import TRAINED  # noqa: E402
-from benchmark.models.trained_models import DIRECT_TABULAR, LAGS, autogluon_trainer  # noqa: E402
+from benchmark.models.trained_models import (  # noqa: E402
+    DEEPAR, DIRECT_TABULAR, LAGS, TUNING_DAYS, autogluon_trainer, input_steps, tuning_split,
+)
 from benchmark.tasks import BUCKETS_PER_DAY, HORIZON, QUANTILE_LEVELS  # noqa: E402
 
+TABULAR = ("ag_direct_tabular", "ag_recursive_tabular")
 MODEL_CLASSES = {"ag_direct_tabular": "DirectTabularModel", "ag_recursive_tabular": "RecursiveTabularModel"}
+SHORT_DEEPAR = {**DEEPAR, "max_epochs": 2, "num_batches_per_epoch": 5}  # same network, 2 short epochs
 BUILT: dict = {}
 
 
-# 30 days of a noisy daily pattern: 16 days of training, then 3 contexts of 14 days, each 6 h later than the last.
-def _data() -> tuple[list[pd.Series], list[pd.Series]]:
-    index = pd.date_range("2026-01-01", periods=30 * BUCKETS_PER_DAY, freq="15min")
+# A noisy daily pattern: `days` of training (default 16), then 3 contexts of 14 days ending 0, 6 and 12 h later.
+def _data(days: int = 16) -> tuple[list[pd.Series], list[pd.Series]]:
+    index = pd.date_range("2026-01-01", periods=(days + 2) * BUCKETS_PER_DAY, freq="15min")
     rng = np.random.default_rng(0)
     y = pd.Series(10 + 5 * np.sin(np.arange(len(index)) * 2 * np.pi / 96) + rng.normal(0, 0.3, len(index)),
                   index=index)
-    contexts = [y.iloc[16 * 96 - 1344 + 24 * k: 16 * 96 + 24 * k] for k in range(3)]
-    return [y.iloc[: 16 * 96]], contexts
+    contexts = [y.iloc[days * 96 - 1344 + 24 * k: days * 96 + 24 * k] for k in range(3)]
+    return [y.iloc[: days * 96]], contexts
 
 
 # The trainer, its parameters and a forecaster fitted with seed 0 on _data(), built once per test session.
@@ -39,7 +46,7 @@ def _fitted(name: str) -> tuple:
     return BUILT[name]
 
 
-@pytest.mark.parametrize("name", list(TRAINED))
+@pytest.mark.parametrize("name", TABULAR)
 def test_hyperparameters_are_known_values_only_and_fit_the_context(name):
     from autogluon.timeseries import models
     _, params, forecaster, _ = _fitted(name)
@@ -57,7 +64,7 @@ def test_hyperparameters_are_known_values_only_and_fit_the_context(name):
     assert all(item.startswith("train") for item in model._residuals_std_per_item.index)
 
 
-@pytest.mark.parametrize("name", list(TRAINED))
+@pytest.mark.parametrize("name", TABULAR)
 def test_trained_shape_finite_and_batch_independent(name):
     _, params, forecaster, info = _fitted(name)
     _, contexts = _data()
@@ -75,10 +82,10 @@ def test_trained_shape_finite_and_batch_independent(name):
 
 def test_only_recursive_tabular_is_a_point_forecaster():
     assert {name: TRAINED[name].build()[1]["point_only"] for name in TRAINED} == {
-        "ag_direct_tabular": False, "ag_recursive_tabular": True}
+        "ag_direct_tabular": False, "ag_recursive_tabular": True, "ag_deepar": False}
 
 
-@pytest.mark.parametrize("name", list(TRAINED))
+@pytest.mark.parametrize("name", TABULAR)
 def test_the_same_seed_gives_the_same_forecasts(name):
     trainer, _, forecaster, _ = _fitted(name)
     items, contexts = _data()
@@ -98,3 +105,72 @@ def test_a_model_autogluon_skips_raises_instead_of_forecasting_nothing():
     items, _ = _data()
     with pytest.raises(RuntimeError, match="TRAINED NO DirectTabular MODEL"):
         trainer("S", items, 0)
+
+
+
+def test_every_trained_input_window_fits_the_shortest_context():
+    for name, baseline in TRAINED.items():
+        assert baseline.build()[1]["input_steps"] <= min(baseline.contexts) * BUCKETS_PER_DAY, name
+    assert input_steps(DEEPAR) == 2 * 96 + 672 - 1
+
+
+def test_tuning_split_holds_out_the_final_days_one_window_each():
+    index = pd.date_range("2026-01-01", periods=25 * BUCKETS_PER_DAY, freq="15min")
+    first, last = pd.Series(1.0, index=index[:5 * 96]), pd.Series(np.arange(20 * 96.0), index=index[5 * 96:])
+    train, tune = tuning_split([first, last], 7, 863, holdout=191)
+
+    assert train[0] is first
+    assert train[1].index[-1] == last.index[-1] - pd.Timedelta(days=7) - 191 * pd.Timedelta("15min")
+    assert [t.index[-1] for t in tune] == [last.index[-1] - pd.Timedelta(days=k) for k in range(7)]
+    # Every step a GluonTS validation loss scores (the last 96 of a tuning item and the 191 before them) comes after
+    # the last training step.
+    assert all(t.index[-(96 + 191)] > train[1].index[-1] for t in tune)
+    with pytest.raises(ValueError, match="TOO SHORT"):  # 1,057 steps left < a 1,055-step window plus a horizon
+        tuning_split([first, last], 7, 863 + 192, holdout=191)
+
+
+def test_registered_deepar_values_only_with_early_stopping_on_the_final_week():
+    _, params = TRAINED["ag_deepar"].build()
+    hyperparameters = params["hyperparameters"]
+    assert hyperparameters["time_features"] == [] and max(hyperparameters["lags_seq"]) == 672
+    assert hyperparameters["disable_static_features"] and hyperparameters["disable_known_covariates"]
+    assert params["tuning_days"] == TUNING_DAYS == 7 and params["point_only"] is False
+
+
+def test_deepar_network_early_stopping_seed_and_sampling(monkeypatch):
+    trainer, _ = autogluon_trainer("DeepAR", SHORT_DEEPAR, tuning_days=TUNING_DAYS)
+    items, contexts = _data(days=20)  # 13 days of training after the 7 tuning days
+    forecaster, info = trainer("S", items, 0)
+
+    model = forecaster.predictor._learner.load_trainer().load_model(forecaster.predictor.model_names()[0])
+    network = model.gts_predictor.prediction_net.model
+    assert network.context_length == 192 and max(network.lags_seq) == 671  # GluonTS stores lag - 1
+    assert network._past_length == input_steps(DEEPAR)
+    assert network.num_feat_dynamic_real == 1  # only the built-in age feature: no time features
+    # Early stopping ran on the tuning data: a validation loss was logged every epoch, and the fit record has it.
+    assert info["tuning_days"] == 7 and info["holdout_steps"] == 191
+    assert 1 <= info["best_epoch"] <= info["epochs_run"] <= SHORT_DEEPAR["max_epochs"]
+    assert np.isfinite(info["best_val_loss"])
+    assert info["training_rows"] == 13 * 96 - 191
+
+    batch, status = forecaster(contexts, HORIZON, QUANTILE_LEVELS, 0)
+    assert batch.shape == (3, HORIZON, len(QUANTILE_LEVELS)) and status == ["ok"] * 3 and np.isfinite(batch).all()
+    np.testing.assert_array_equal(batch, forecaster(contexts, HORIZON, QUANTILE_LEVELS, 0)[0])
+
+    # No path between series: the distribution parameters the network computes over a context (its first projection
+    # call, on the context window) are the same whatever the other contexts are. The sampled paths may still differ,
+    # because torch's Student-t sampler consumes random numbers depending on every element's degrees of freedom.
+    # AutoGluon loads the model from disk for each prediction, so the projection is wrapped at the class level.
+    captured = []
+    projection = type(network.param_proj)
+    original = projection.forward
+    monkeypatch.setattr(projection, "forward", lambda self, x: captured.append(original(self, x)) or captured[-1])
+    forecaster(contexts, HORIZON, QUANTILE_LEVELS, 0)
+    alone = [t.detach().clone() for t in captured[0]]
+    captured.clear()
+    forecaster([contexts[0] + 100.0, contexts[1], contexts[2] - 50.0], HORIZON, QUANTILE_LEVELS, 0)
+    mixed = [t.detach().clone() for t in captured[0]]
+    assert alone[0].shape[0] == 3 and alone[0].shape[1] >= 192  # batch × context window
+    for a, b in zip(alone, mixed):
+        np.testing.assert_allclose(a[1].numpy(), b[1].numpy(), rtol=1e-6, atol=1e-6)
+        assert not np.allclose(a[0].numpy(), b[0].numpy())  # the changed neighbour does change its own row

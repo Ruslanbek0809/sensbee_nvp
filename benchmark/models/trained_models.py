@@ -10,6 +10,15 @@
 # - LightGBM: AutoGluon's defaults written out (10,000 rounds, learning rate 0.05, adaptive early stopping on the last
 #   96 rows of each training item, which the tabular models hold out themselves) plus the harness seed;
 # - max_num_items / max_num_samples = None: no random subsampling of items or rows.
+# DeepAR (GluonTS): time_features=[], no static or known covariates, AutoGluon's defaults for the network and training
+# written out, and context_length = 2 days unrolled plus the same lags (one week back), an input window of 863 steps.
+# Without validation data AutoGluon gives GluonTS models no early stopping, so DeepAR stops on the final TUNING_DAYS
+# before the cutoff: those days are held out of training and validated one day at a time, and GluonTS keeps the
+# epoch with the lowest validation loss. Its validation loss also scores the context_length - 1 steps before each
+# validated day (DeepARLightningModule.validation_step has no future_only), so training ends that much earlier as
+# well and no scored step was trained on. The epochs run, the best epoch and its loss come from the Lightning logs
+# (keep_lightning_logs) into the fit record. GluonTS drops unknown hyperparameter keys without a word, so the tests
+# check the fitted network itself. Its built-in log "age" feature (position in the given series) has no switch.
 # The tabular target scaler is fitted per series on whatever it is given: the whole training item when fitting, the
 # 14- or 28-day context when forecasting. Training items get ids ("train000000", ...) that no context id ("000000",
 # ...) can match, so every context is a series unseen in fit. RecursiveTabular's quantiles are then Gaussian around its
@@ -25,7 +34,7 @@ import pandas as pd
 
 from benchmark.models.autogluon_models import _batch_frame
 from benchmark.snapshot import BUCKET_FREQ
-from benchmark.tasks import HORIZON, QUANTILE_LEVELS, SEASON
+from benchmark.tasks import BUCKETS_PER_DAY, HORIZON, QUANTILE_LEVELS, SEASON
 
 logger = logging.getLogger(__name__)
 
@@ -35,17 +44,54 @@ LIGHTGBM = {"num_boost_round": 10000, "learning_rate": 0.05, "ag.early_stop": "a
 TABULAR_COMMON = {"lags": list(LAGS), "date_features": [], "model_name": "GBM", "max_num_items": None,
                   "max_num_samples": None}
 EVAL_METRIC = "SQL"
+TUNING_DAYS = 7
 
 
-# Steps of history a tabular model reads: its largest lag plus its differencing.
-def tabular_input_steps(params: dict) -> int:
+# Steps of history a model reads: a tabular model's largest lag plus its differencing, or a GluonTS model's unrolled
+# context plus its largest lag minus one (GluonTS stores lag l as index l - 1).
+def input_steps(params: dict) -> int:
+    if "lags_seq" in params:
+        return params["context_length"] + max(params["lags_seq"]) - 1
     return max(params["lags"]) + sum(params["differences"])
 
 
+# Splits training items for early stopping on the last `days` days: training then ends `days` days plus `holdout`
+# steps before the end of the last item, and the tuning data holds `days` copies of that item, cut 0, 1, ... days
+# before its end, so the model validates on each of the final days (the last HORIZON steps of each tuning item, plus
+# the `holdout` steps before them that a GluonTS validation loss also scores). Raises when the shortened item can't hold
+# one full input window plus a horizon.
+def tuning_split(items: list[pd.Series], days: int, steps: int,
+                 holdout: int = 0) -> tuple[list[pd.Series], list[pd.Series]]:
+    last = items[-1]
+    keep = len(last) - days * BUCKETS_PER_DAY - holdout
+    if keep < steps + HORIZON:
+        raise ValueError(f"LAST TRAINING ITEM OF {len(last)} STEPS IS TOO SHORT FOR {days} TUNING DAYS")
+    return [*items[:-1], last.iloc[:keep]], [last.iloc[: len(last) - k * BUCKETS_PER_DAY] for k in range(days)]
+
+
+# Epochs run, the best epoch (1-based, from the best checkpoint's file name) and its validation loss, read from the
+# Lightning logs a GluonTS model keeps with keep_lightning_logs. Raises when no validation loss was logged.
+def _lightning_epochs(folder: Path) -> dict:
+    from tensorboard.backend.event_processing.event_accumulator import EventAccumulator
+    (version,) = folder.glob("**/lightning_logs/version_*")
+    events = EventAccumulator(str(version))
+    events.Reload()
+    if "val_loss" not in events.Tags()["scalars"]:
+        raise RuntimeError("NO VALIDATION LOSS LOGGED: EARLY STOPPING DID NOT RUN")
+    losses = [event.value for event in events.Scalars("val_loss")]
+    (checkpoint,) = version.glob("checkpoints/epoch=*.ckpt")
+    best = int(checkpoint.name.split("-")[0].removeprefix("epoch=")) + 1
+    return {"epochs_run": len(losses), "best_epoch": best, "best_val_loss": float(losses[best - 1])}
+
+
 # Builds a trainer for one AutoGluon global model (its hyperparameter key, e.g. "DirectTabular") and returns it with
-# the hyperparameters recorded in run.json. point_only: every quantile is the model's own forecast ("mean").
-def autogluon_trainer(model: str, params: dict, point_only: bool = False):
-    hyperparameters = {**params, "model_hyperparameters": dict(LIGHTGBM)}
+# the hyperparameters recorded in run.json. point_only: every quantile is the model's own forecast ("mean");
+# tuning_days > 0: early stopping on the final days before the cutoff (tuning_split). A tabular model gets the harness
+# seed in its LightGBM hyperparameters; every model gets it as AutoGluon's fit and predict seed.
+def autogluon_trainer(model: str, params: dict, point_only: bool = False, tuning_days: int = 0):
+    hyperparameters = dict(params)
+    steps = input_steps(params)
+    holdout = params.get("context_length", 1) - 1 if tuning_days else 0
 
     def train(sensor: str, items: list[pd.Series], seed: int):
         from autogluon.timeseries import TimeSeriesPredictor
@@ -55,12 +101,22 @@ def autogluon_trainer(model: str, params: dict, point_only: bool = False):
         predictor = TimeSeriesPredictor(prediction_length=HORIZON, freq=BUCKET_FREQ,
                                         quantile_levels=list(QUANTILE_LEVELS), eval_metric=EVAL_METRIC,
                                         path=str(Path(workdir.name) / "predictor"), verbosity=0, log_to_file=False)
-        fitted = {**hyperparameters, "model_hyperparameters": {**hyperparameters["model_hyperparameters"],
-                                                               "seed": seed}}
-        predictor.fit(_batch_frame(items, prefix="train"), hyperparameters={model: fitted}, enable_ensemble=False,
-                      skip_model_selection=True, random_seed=seed)
+        fitted = dict(hyperparameters)
+        if "model_hyperparameters" in fitted:
+            fitted["model_hyperparameters"] = {**fitted["model_hyperparameters"], "seed": seed}
+        info = {"training_rows": int(sum(len(i) for i in items))}
+        tuning = None
+        if tuning_days:
+            items, tune = tuning_split(items, tuning_days, steps, holdout)
+            tuning = _batch_frame(tune, prefix="tune")
+            info.update(training_rows=int(sum(len(i) for i in items)), tuning_days=tuning_days,
+                        holdout_steps=holdout, tuning_end=str(tune[0].index[-1]))
+        predictor.fit(_batch_frame(items, prefix="train"), tuning_data=tuning, hyperparameters={model: fitted},
+                      enable_ensemble=False, skip_model_selection=True, random_seed=seed)
         if not predictor.model_names():  # AutoGluon logs a failed fit and skips the model instead of raising
             raise RuntimeError(f"AUTOGLUON TRAINED NO {model} MODEL FOR {sensor}")
+        if params.get("keep_lightning_logs"):
+            info.update(_lightning_epochs(Path(workdir.name)))
         columns = ["mean"] * len(QUANTILE_LEVELS) if point_only else [str(level) for level in QUANTILE_LEVELS]
 
         def forecast(contexts: list[pd.Series], horizon: int, levels: tuple[float, ...],
@@ -73,12 +129,21 @@ def autogluon_trainer(model: str, params: dict, point_only: bool = False):
             return quantiles, ["ok"] * len(contexts)
 
         forecast.workdir, forecast.predictor = workdir, predictor  # the folder lives as long as the forecaster
-        return forecast, {"models": predictor.model_names(), "training_rows": int(sum(len(i) for i in items))}
+        return forecast, {"models": predictor.model_names(), **info}
 
     return train, {"library": "autogluon.timeseries", "model": model, "hyperparameters": hyperparameters,
-                   "eval_metric": EVAL_METRIC, "point_only": point_only, "input_steps": tabular_input_steps(params)}
+                   "eval_metric": EVAL_METRIC, "point_only": point_only, "input_steps": steps,
+                   "tuning_days": tuning_days}
 
 
 # The two tabular models (AutoGluon's own differences and scalers, written out).
-DIRECT_TABULAR = {**TABULAR_COMMON, "differences": [], "target_scaler": "mean_abs"}
-RECURSIVE_TABULAR = {**TABULAR_COMMON, "differences": [SEASON], "target_scaler": "standard"}
+DIRECT_TABULAR = {**TABULAR_COMMON, "differences": [], "target_scaler": "mean_abs",
+                  "model_hyperparameters": dict(LIGHTGBM)}
+RECURSIVE_TABULAR = {**TABULAR_COMMON, "differences": [SEASON], "target_scaler": "standard",
+                     "model_hyperparameters": dict(LIGHTGBM)}
+# DeepAR: AutoGluon's network and training defaults written out (2 LSTM layers of 40, dropout 0.1, Student-t output,
+# mean scaling per window, 100 epochs of 50 batches of 64, learning rate 1e-3, patience 20, 250 sample paths).
+DEEPAR = {"context_length": 2 * SEASON, "lags_seq": list(LAGS), "time_features": [], "disable_static_features": True,
+          "disable_known_covariates": True, "num_layers": 2, "hidden_size": 40, "dropout_rate": 0.1, "scaling": True,
+          "max_epochs": 100, "num_batches_per_epoch": 50, "batch_size": 64, "lr": 1e-3, "early_stopping_patience": 20,
+          "predict_batch_size": 500, "keep_lightning_logs": True}

@@ -20,7 +20,7 @@ from benchmark.models.statsforecast_models import mstl_forecaster
 from benchmark.models.timesfm_models import timesfm25_forecaster
 from benchmark.models.tirex_models import tirex_forecaster
 from benchmark.models.toto_models import toto_forecaster
-from benchmark.models.trained_models import DIRECT_TABULAR, RECURSIVE_TABULAR, autogluon_trainer
+from benchmark.models.trained_models import DEEPAR, DIRECT_TABULAR, RECURSIVE_TABULAR, TUNING_DAYS, autogluon_trainer
 from benchmark.tasks import SEASON
 
 WEEK = 7 * SEASON
@@ -34,7 +34,7 @@ TOTO = ("Datadog/Toto-Open-Base-1.0", "0411ceb27bdf7fc3e4892e99edc8ad08192dc3c5"
 MOIRAI2_SMALL = ("Salesforce/moirai-2.0-R-small", "30f43ff08c8494f4943ae1521e9d4e94a0fbb389")
 PACKAGES = ("autogluon.timeseries", "statsforecast", "statsmodels", "scipy", "torch", "coreforecast", "joblib",
             "chronos-forecasting", "transformers", "huggingface_hub", "accelerate", "timesfm", "tirex-ts", "uni2ts",
-            "lightgbm", "mlforecast")
+            "lightgbm", "mlforecast", "gluonts", "lightning")
 
 
 # One baseline: build() → (forecaster, parameters), or (trainer, parameters) for a TRAINED model; contexts: the
@@ -89,12 +89,14 @@ ZERO_SHOT: dict[str, Baseline] = {
 
 
 # Trained models (Phase 3): one model per sensor, fitted on the data before the period and frozen. Their input window
-# (largest lag plus differencing, at most 768 steps) fits the 14-day context, so they run on 14 and 28 days.
-# RecursiveTabular is a point forecaster (its intervals come from the context, not the model; decision D3-5).
+# (at most 863 steps: DeepAR's 192 unrolled steps plus its 672-step lag) fits the 14-day context, so they run on 14 and
+# 28 days. RecursiveTabular is a point forecaster (its intervals come from the context, not the model; decision D3-5).
+# DeepAR stops early on the final TUNING_DAYS before the cutoff.
 TRAINED: dict[str, Baseline] = {
     "ag_direct_tabular": Baseline(lambda: autogluon_trainer("DirectTabular", DIRECT_TABULAR), (14, 28)),
     "ag_recursive_tabular": Baseline(lambda: autogluon_trainer("RecursiveTabular", RECURSIVE_TABULAR,
                                                                point_only=True), (14, 28)),
+    "ag_deepar": Baseline(lambda: autogluon_trainer("DeepAR", DEEPAR, tuning_days=TUNING_DAYS), (14, 28)),
 }
 
 
