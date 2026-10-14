@@ -25,12 +25,13 @@ import pandas as pd
 logger = logging.getLogger(__name__)
 
 TOP_P = 0.9
+BATCH_SIZE = 1
 
 
 # Builds an LLMTime forecaster for one model id and revision, and returns it with the effective settings. complete:
 # the completion function (called like nvp_llms.call_llm_completion); by default local generation with the model.
 def llmtime_forecaster(model_id: str, revision: str, num_forecasts: int = 5, temperature: float = 0.9,
-                       use_normalization: bool = True, dtype: str = "float16",
+                       use_normalization: bool = True, alpha: float = 0.95, beta: float = 0.3, dtype: str = "float16",
                        complete: Optional[Callable] = None):
     diagnostics: Counter = Counter()
     backend = None
@@ -44,13 +45,13 @@ def llmtime_forecaster(model_id: str, revision: str, num_forecasts: int = 5, tem
     def generate(prompt: str, settings, num_forecasts: int, temperature: float, steps: int, **_) -> list[str]:
         from src.models.local_llm import local_llm_completion
         return local_llm_completion(input_str=prompt, settings=settings, model_name=model_id, steps=steps,
-                                    num_forecasts=num_forecasts, batch_size=1, temperature=temperature, top_p=TOP_P,
+                                    num_forecasts=num_forecasts, batch_size=BATCH_SIZE, temperature=temperature, top_p=TOP_P,
                                     dtype=dtype, revision=revision, multi_gpu=False)
 
     def forecast(contexts: list[pd.Series], horizon: int, levels: tuple[float, ...],
                  seed: int) -> tuple[np.ndarray, list[str]]:
         import torch
-        from src.models.nvp_llms import aggregate_samples, llmtime_samples  # loads .env on import: only when used
+        from src.models.nvp_llms import llmtime_samples  # loads .env on import: only when used
         out = np.full((len(contexts), horizon, len(levels)), np.nan)
         status = []
         for i, context in enumerate(contexts):
@@ -58,16 +59,15 @@ def llmtime_forecaster(model_id: str, revision: str, num_forecasts: int = 5, tem
             try:
                 result = llmtime_samples(context, horizon, provider="local", model=model_id,
                                          num_forecasts=num_forecasts, temperature=temperature,
-                                         use_normalization=use_normalization, complete=complete or generate)
+                                         use_normalization=use_normalization, alpha=alpha, beta=beta,
+                                         complete=complete or generate)
             except Exception as exc:
                 logger.warning(f"LLMTIME ORIGIN {i} FAILED ({type(exc).__name__}: {exc})")
-                diagnostics["failed"] += 1
                 status.append("failed")
                 continue
             diagnostics.update(result.counts)
             if result.samples:
-                point = aggregate_samples(result.samples, method="median")
-                point = result.scaler.inverse_transform(point) if use_normalization else point
+                point = result.point(use_normalization)
                 status.append("ok")
             else:
                 point = np.full(horizon, result.last_value)
@@ -86,5 +86,6 @@ def llmtime_forecaster(model_id: str, revision: str, num_forecasts: int = 5, tem
                       "revision": revision, "dtype": dtype, "device_backend": backend, "multi_gpu": False,
                       "num_forecasts": num_forecasts,
                       "temperature": temperature, "top_p": TOP_P, "use_normalization": use_normalization,
-                      "alpha": 0.95, "beta": 0.3, "batch_size": 1, "aggregation": "median", "clipping": None,
+                      "alpha": alpha, "beta": beta, "batch_size": BATCH_SIZE, "aggregation": "median",
+                      "clipping": None,
                       "fallback": "last value, status fallback", "point_only": True}

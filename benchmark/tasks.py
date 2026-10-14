@@ -176,9 +176,16 @@ def target_window(series: pd.Series, origin: pd.Timestamp) -> pd.Series:
 def scale_history(series: pd.Series, origin: pd.Timestamp, task: SensorTask) -> np.ndarray:
     history = series.reindex(pd.date_range(origin - pd.Timedelta(days=SCALE_DAYS), origin, freq=BUCKET_FREQ,
                                            inclusive="left"))
-    for start, end, _ in task.exclusions:
-        history[(history.index >= pd.Timestamp(start)) & (history.index < pd.Timestamp(end))] = np.nan
+    history[_excluded(history.index, task)] = np.nan
     return history.to_numpy(dtype=float)
+
+
+# Marks the timestamps inside any of the task's exclusions ([start, end)).
+def _excluded(index: pd.DatetimeIndex, task: SensorTask) -> np.ndarray:
+    mask = np.zeros(len(index), dtype=bool)
+    for start, end, _ in task.exclusions:
+        mask |= (index >= pd.Timestamp(start)) & (index < pd.Timestamp(end))
+    return mask
 
 
 # Training data for a fitted model: the series strictly before the cutoff. When one model is fitted or tuned on
@@ -198,9 +205,7 @@ def training_items(series: pd.Series, task: SensorTask, cutoff: pd.Timestamp) ->
         history = history.loc[pd.Timestamp(task.train_start):]
     missing = history.isna()
     run_length = missing.groupby((missing != missing.shift()).cumsum()).transform("size")
-    split = missing & (run_length > TRAIN_GAP_BUCKETS)
-    for start, end, _ in task.exclusions:
-        split |= (history.index >= pd.Timestamp(start)) & (history.index < pd.Timestamp(end))
+    split = (missing & (run_length > TRAIN_GAP_BUCKETS)) | _excluded(history.index, task)
     pieces = history[~split].groupby(split.cumsum()[~split])
     items = [piece.ffill().dropna() for _, piece in pieces]
     return [item for item in items if len(item) >= MIN_TRAIN_DAYS * BUCKETS_PER_DAY]

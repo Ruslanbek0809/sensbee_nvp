@@ -322,6 +322,11 @@ class LLMTimeSamples:
     last_value: float
     counts: Dict[str, int]
 
+    # The median of the valid samples on the original scale (Steps 6-7); use_normalization: the samples are normalized.
+    def point(self, use_normalization: bool) -> np.ndarray:
+        median = aggregate_samples(self.samples, method="median")
+        return self.scaler.inverse_transform(median) if use_normalization else median
+
 
 # Runs LLMTime steps 1-5 (scale, serialize, prompt, complete, parse and filter) and returns the valid samples.
 # complete: the completion function, called like call_llm_completion (the default).
@@ -537,14 +542,8 @@ def nvp_llms_forecast(
     
     logger.info(f"VALID FORECASTS AFTER FILTERING: {len(valid_samples)}/{num_forecasts}")
     
-    # Step 6: Aggregates samples
-    normalized_forecast = aggregate_samples(valid_samples, method="median")
-    
-    # Step 7: Inverses transform
-    if use_normalization:
-        forecast = result.scaler.inverse_transform(normalized_forecast)
-    else:
-        forecast = normalized_forecast
+    # Steps 6-7: Aggregates samples and inverses the transform
+    forecast = result.point(use_normalization)
     
     # Post-processing: clip visitor-type columns to non-negative values.
     # Visitor counts cannot be negative; the scaler can produce sub-zero values

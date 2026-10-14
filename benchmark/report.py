@@ -296,13 +296,13 @@ def make_report(run_dirs: list[Path], out_root: Path, reference: tuple[str, int]
     dm_table.to_csv(report_dir / "dm.csv", index=False)
     clipped.to_csv(report_dir / "clipped_visitors.csv", index=False)
     failures(records).to_csv(report_dir / "failures.csv", index=False)
-    (report_dir / "summary.md").write_text(summary_markdown(cell_table, skill_table, records, reference,
-                                                            None if keep is None else len(keep)))
+    n_common = None if keep is None else len(keep)
+    (report_dir / "summary.md").write_text(summary_markdown(cell_table, skill_table, records, reference, n_common))
     first = next(iter(records.values()))
     (report_dir / "report.json").write_text(json.dumps({
         "report_id": report_dir.name, "runs": {m: r["run_id"] for m, r in records.items()},
         "snapshot": first["snapshot"], "period": first["period"], "reference": list(reference),
-        "dm": {"horizon": DM_HORIZON, "harvey_adj": True}, "common_origins": None if keep is None else len(keep),
+        "dm": {"horizon": DM_HORIZON, "harvey_adj": True}, "common_origins": n_common,
         "code": git_state(),
         "created_utc": started.strftime("%Y-%m-%dT%H:%M:%S"),
     }, indent=2))

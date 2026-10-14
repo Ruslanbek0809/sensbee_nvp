@@ -36,6 +36,13 @@ def _batch_frame(contexts: list[pd.Series], prefix: str = ""):
     return TimeSeriesDataFrame.from_data_frame(pd.concat(frames, ignore_index=True))
 
 
+# Reads AutoGluon predictions for the items _batch_frame numbered 0..n-1 into [n, horizon, levels]: the model's own
+# quantiles, or its point forecast ("mean") in every column when point_only.
+def _quantiles(predictions: pd.DataFrame, n: int, levels: tuple[float, ...], point_only: bool) -> np.ndarray:
+    columns = ["mean"] * len(levels) if point_only else [str(level) for level in levels]
+    return np.stack([predictions.loc[f"{i:06d}", columns].to_numpy(dtype=float) for i in range(n)])
+
+
 # Builds a forecaster for one AutoGluon local model (its hyperparameter key, e.g. "AutoETS") and returns it with the
 # effective hyperparameters. point_only: every quantile is the model's own forecast ("mean"), for models whose
 # quantiles are not their forecast distribution (Theta: 200 simulated paths, decision D-B4).
@@ -52,10 +59,7 @@ def autogluon_forecaster(model: str, params: dict, point_only: bool = False):
             predictor.fit(data, hyperparameters={model: hyperparameters}, enable_ensemble=False,
                           skip_model_selection=True, random_seed=seed)
             predictions = predictor.predict(data, random_seed=seed)
-        columns = ["mean"] * len(levels) if point_only else [str(level) for level in levels]
-        quantiles = np.stack([predictions.loc[f"{i:06d}", columns].to_numpy(dtype=float)
-                              for i in range(len(contexts))])
-        return quantiles, ["ok"] * len(contexts)
+        return _quantiles(predictions, len(contexts), levels, point_only), ["ok"] * len(contexts)
 
     return forecast, {"library": "autogluon.timeseries", "model": model, "hyperparameters": hyperparameters,
                       "point_only": point_only}

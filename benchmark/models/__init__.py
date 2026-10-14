@@ -41,14 +41,15 @@ PACKAGES = ("autogluon.timeseries", "statsforecast", "statsmodels", "scipy", "to
             "lightgbm", "mlforecast", "gluonts", "lightning")
 
 
-# One baseline: build() → (forecaster, parameters), or (trainer, parameters) for a TRAINED model; contexts: the
-# allowed context lengths in days; weights: for a zero-shot model, (model id, revision, weight file name) in the
-# Hugging Face cache.
+# One baseline: build() → (forecaster, parameters), or (trainer, parameters) when trained; contexts: the allowed
+# context lengths in days; weights: for a zero-shot model, (model id, revision, weight file name) in the Hugging Face
+# cache; trained: build() returns a trainer, fitted per sensor by the runner.
 @dataclass(frozen=True)
 class Baseline:
     build: Callable
     contexts: tuple[int, ...]
     weights: Optional[tuple[str, str, str]] = None
+    trained: bool = False
 
 
 # AutoGluon SeasonalNaive uses its seasonal branch only when the context has more than m + 1 steps, otherwise it
@@ -97,12 +98,13 @@ ZERO_SHOT: dict[str, Baseline] = {
 # 28 days. RecursiveTabular is a point forecaster (its intervals come from the context, not the model; decision D3-5).
 # DeepAR and PatchTST stop early on the final TUNING_DAYS before the cutoff.
 TRAINED: dict[str, Baseline] = {
-    "ag_direct_tabular": Baseline(lambda: autogluon_trainer("DirectTabular", DIRECT_TABULAR), (14, 28)),
+    "ag_direct_tabular": Baseline(lambda: autogluon_trainer("DirectTabular", DIRECT_TABULAR), (14, 28), trained=True),
     "ag_recursive_tabular": Baseline(lambda: autogluon_trainer("RecursiveTabular", RECURSIVE_TABULAR,
-                                                               point_only=True), (14, 28)),
+                                                               point_only=True), (14, 28), trained=True),
     "ag_deepar": Baseline(lambda: autogluon_trainer("DeepAR", DEEPAR, tuning_days=TUNING_DAYS,
-                                                    holdout=DEEPAR_HOLDOUT), (14, 28)),
-    "ag_patchtst": Baseline(lambda: autogluon_trainer("PatchTST", PATCHTST, tuning_days=TUNING_DAYS), (14, 28)),
+                                                    holdout=DEEPAR_HOLDOUT), (14, 28), trained=True),
+    "ag_patchtst": Baseline(lambda: autogluon_trainer("PatchTST", PATCHTST, tuning_days=TUNING_DAYS), (14, 28),
+                            trained=True),
 }
 
 

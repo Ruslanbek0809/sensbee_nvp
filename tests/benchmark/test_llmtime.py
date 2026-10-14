@@ -62,7 +62,7 @@ def test_point_only_fallback_failure_and_counts():
     np.testing.assert_array_equal(out[1, :, 4], np.full(HORIZON, contexts[1].iloc[-1]))
     assert np.isnan(out[2]).all() and seeds == [7, 7, 7]
     assert forecast.drain_diagnostics() == {"completions": 6, "parse_failed": 0, "filtered_a": 0, "filtered_b": 3,
-                                            "filtered_c": 0, "filtered_d": 0, "valid": 3, "failed": 1}
+                                            "filtered_c": 0, "filtered_d": 0, "valid": 3}
     assert forecast.drain_diagnostics() == {}
     assert params["point_only"] and params["clipping"] is None and params["batch_size"] == 1
     assert (params["model_id"], params["revision"]) == MISTRAL_7B and params["dtype"] == "float16"

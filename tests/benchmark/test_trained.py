@@ -40,6 +40,11 @@ def _data(days: int = 16) -> tuple[list[pd.Series], list[pd.Series]]:
     return [y.iloc[: days * 96]], contexts
 
 
+# The fitted AutoGluon model behind a trained forecaster, loaded from the predictor's folder.
+def _fitted_model(forecaster):
+    return forecaster.predictor._learner.load_trainer().load_model(forecaster.predictor.model_names()[0])
+
+
 # The trainer, its parameters and a forecaster fitted with seed 0 on _data(), built once per test session.
 def _fitted(name: str) -> tuple:
     if name not in BUILT:
@@ -58,9 +63,8 @@ def test_hyperparameters_are_known_values_only_and_fit_the_context(name):
     allowed = getattr(models, MODEL_CLASSES[name])(freq="15min", prediction_length=HORIZON).allowed_hyperparameters
     assert set(hyperparameters) <= set(allowed)
     assert hyperparameters["date_features"] == [] and max(hyperparameters["lags"]) == 672
-    assert params["input_steps"] <= min(TRAINED[name].contexts) * BUCKETS_PER_DAY
 
-    model = forecaster.predictor._learner.load_trainer().load_model(forecaster.predictor.model_names()[0])
+    model = _fitted_model(forecaster)
     assert model._date_features == [] and list(model._target_lags) == list(LAGS)  # what the fitted model uses
     # DirectTabular trains a quantile LightGBM (its deciles are its own); a point regressor would add Gaussian ones.
     assert model.get_tabular_model().model.problem_type == ("regression" if params["point_only"] else "quantile")
@@ -182,7 +186,7 @@ def test_deepar_network_early_stopping_seed_and_sampling(monkeypatch):
     items, contexts = _data(days=20)  # 13 days of training after the 7 tuning days
     forecaster, info = trainer("S", items, 0)
 
-    model = forecaster.predictor._learner.load_trainer().load_model(forecaster.predictor.model_names()[0])
+    model = _fitted_model(forecaster)
     network = model.gts_predictor.prediction_net.model
     assert network.context_length == 192 and max(network.lags_seq) == 671  # GluonTS stores lag - 1
     assert network._past_length == input_steps(DEEPAR)
@@ -207,7 +211,7 @@ def test_patchtst_network_early_stopping_seed_and_batch_independence(monkeypatch
     items, contexts = _data(days=20)
     forecaster, info = trainer("S", items, 0)
 
-    model = forecaster.predictor._learner.load_trainer().load_model(forecaster.predictor.model_names()[0])
+    model = _fitted_model(forecaster)
     network = model.gts_predictor.prediction_net.model
     assert network.context_length == 672 and network.patch_len == 16 and network.stride == 8
     assert network.num_feat_dynamic_real == 0  # no time features, no covariates

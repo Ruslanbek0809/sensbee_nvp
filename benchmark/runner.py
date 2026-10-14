@@ -148,11 +148,14 @@ def _forecast_frame(sensor: str, context: str, origins: list[pd.Timestamp], stat
     })
 
 
-# JSON fallback for a trainer's fit info: numpy scalars become Python numbers, anything else is refused.
-def _plain(value: object) -> object:
-    if isinstance(value, np.generic):
-        return value.item()
-    raise TypeError(f"FIT INFO VALUE OF TYPE {type(value).__name__} IS NOT JSON")
+# A trainer's fit info or a forecaster's diagnostics as plain JSON: numpy scalars become Python numbers, anything
+# else that isn't JSON raises.
+def _plain_json(value: object) -> object:
+    def plain(item: object) -> object:
+        if isinstance(item, np.generic):
+            return item.item()
+        raise TypeError(f"VALUE OF TYPE {type(item).__name__} IS NOT JSON")
+    return json.loads(json.dumps(value, default=plain))
 
 
 # Fits one sensor's model with the trainer on the training items before the cutoff. Returns the forecaster (None when
@@ -167,7 +170,7 @@ def _fit(trainer: Trainer, sensor: str, series: pd.Series, task: SensorTask, cut
     started = time.perf_counter()
     try:
         forecaster, info = trainer(sensor, items, seed)
-        info = json.loads(json.dumps(info, default=_plain))
+        info = _plain_json(info)
     except Exception as exc:
         logger.warning(f"FIT FAILED for {sensor} ({type(exc).__name__}: {exc}); ALL ITS ORIGINS FAIL")
         forecaster, info = None, {"error": f"{type(exc).__name__}: {exc}"}
@@ -221,12 +224,10 @@ def run(forecaster: Optional[Forecaster], model: str, snapshot_dir: Path, out_ro
             label = "all" if days is None else f"{days}d"
             contexts = [context_window(series, origin, None if days is None else days * BUCKETS_PER_DAY)
                         for origin in origins]
-            if sensor_forecaster is None:  # the fit failed (or nothing to forecast)
-                quantiles, status = np.full((len(origins), HORIZON, len(levels)), np.nan), ["failed"] * len(origins)
-            elif origins:
+            if sensor_forecaster is not None and origins:
                 quantiles, status = _predict(sensor_forecaster, contexts, levels, seed)
-            else:
-                quantiles, status = np.empty((0, HORIZON, len(levels))), []
+            else:  # the fit failed, or nothing to forecast
+                quantiles, status = np.full((len(origins), HORIZON, len(levels)), np.nan), ["failed"] * len(origins)
             crossed = int(np.any(np.diff(quantiles, axis=-1) < 0, axis=-1).sum())
             quantiles = np.sort(quantiles, axis=-1)
             counts[sensor]["contexts"][label] = {**{s: status.count(s) for s in (*STATUSES, "failed")},
@@ -241,8 +242,7 @@ def run(forecaster: Optional[Forecaster], model: str, snapshot_dir: Path, out_ro
                                         "context_steps": len(contexts[i]), "scale": scales[i], **row})
             forecast_frames.append(_forecast_frame(sensor, label, origins, status, targets, quantiles, levels))
         if hasattr(sensor_forecaster, "drain_diagnostics"):
-            counts[sensor]["diagnostics"] = json.loads(json.dumps(sensor_forecaster.drain_diagnostics(),
-                                                                  default=_plain))
+            counts[sensor]["diagnostics"] = _plain_json(sensor_forecaster.drain_diagnostics())
         logger.info(f"RAN {model} on {sensor}: {len(valid)} of {len(table)} origins valid, {len(origins)} evaluated")
 
     run_dir.mkdir(parents=True)

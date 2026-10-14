@@ -30,10 +30,13 @@ def _write_snapshot(tmp_path: Path, values: np.ndarray) -> tuple[Path, dict[str,
     return snapshot_dir, {"W": SensorTask("temperature", "AVG", "regular", "2026-02-01", "2026-02-05")}
 
 
+# Values at TIMES whose daily pattern repeats exactly.
+PERIODIC = np.tile(np.round(10 + 5 * np.sin(np.arange(96) * 2 * np.pi / 96), 3), len(TIMES) // 96)
+
+
 # A snapshot whose daily pattern repeats exactly.
 def _snapshot(tmp_path: Path) -> tuple[Path, dict[str, SensorTask]]:
-    pattern = np.round(10 + 5 * np.sin(np.arange(96) * 2 * np.pi / 96), 3)
-    return _write_snapshot(tmp_path, np.tile(pattern, len(TIMES) // 96))
+    return _write_snapshot(tmp_path, PERIODIC)
 
 
 # Reads a run's run.json.
@@ -232,11 +235,9 @@ def test_a_trainer_is_fitted_once_per_sensor_on_data_before_the_period(tmp_path)
 
 
 def test_data_at_or_after_the_period_start_never_reaches_the_trainer(tmp_path):
-    pattern = np.round(10 + 5 * np.sin(np.arange(96) * 2 * np.pi / 96), 3)
-    values = np.tile(pattern, len(TIMES) // 96)
-    changed = np.where(TIMES >= pd.Timestamp("2026-02-01"), values + 1000, values)
+    changed = np.where(TIMES >= pd.Timestamp("2026-02-01"), PERIODIC + 1000, PERIODIC)
     seen = []
-    for name, data in (("a", values), ("b", changed)):
+    for name, data in (("a", PERIODIC), ("b", changed)):
         calls = []
         snapshot_dir, tasks = _write_snapshot(tmp_path / name, data)
         run(None, "trained", snapshot_dir, tmp_path / name / "runs", tasks=tasks, context_days=(1,),

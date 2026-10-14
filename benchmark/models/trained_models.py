@@ -38,8 +38,8 @@ from pathlib import Path
 import numpy as np
 import pandas as pd
 
-from benchmark.models.autogluon_models import _batch_frame
-from benchmark.snapshot import BUCKET_FREQ
+from benchmark.models.autogluon_models import _batch_frame, _quantiles
+from benchmark.snapshot import BUCKET_FREQ, BUCKETS_PER_WEEK
 from benchmark.tasks import BUCKETS_PER_DAY, HORIZON, QUANTILE_LEVELS, SEASON
 
 logger = logging.getLogger(__name__)
@@ -51,8 +51,10 @@ TABULAR_COMMON = {"lags": list(LAGS), "date_features": [], "model_name": "GBM", 
                   "max_num_samples": None}
 EVAL_METRIC = "SQL"
 TUNING_DAYS = 7
-GLUONTS_MODELS = ("DeepAR", "PatchTST")
-WEEK = 7 * SEASON
+# AutoGluon's training defaults for GluonTS models, written out, plus no covariates and the kept Lightning logs.
+GLUONTS_COMMON = {"disable_static_features": True, "disable_known_covariates": True, "max_epochs": 100,
+                  "num_batches_per_epoch": 50, "batch_size": 64, "lr": 1e-3, "early_stopping_patience": 20,
+                  "predict_batch_size": 500, "keep_lightning_logs": True}
 
 
 # Steps of history a model reads: a tabular model's largest lag plus its differencing, DeepAR's unrolled context plus
@@ -98,11 +100,13 @@ def _lightning_epochs(folder: Path) -> dict:
 # the hyperparameters recorded in run.json. point_only: every quantile is the model's own forecast ("mean");
 # tuning_days > 0: early stopping on the final days before the cutoff (tuning_split), with `holdout` steps before them
 # that the model's validation loss also scores. A tabular model gets the harness seed in its LightGBM
-# hyperparameters; every model gets it as AutoGluon's fit and predict seed.
+# hyperparameters; every model gets it as AutoGluon's fit and predict seed. A GluonTS model (one with a
+# context_length) samples training windows only where a full input window exists (min_past). The fitted model is
+# not persisted in memory: AutoGluon reloads it per prediction, and persisting it changes DeepAR's sampled forecasts.
 def autogluon_trainer(model: str, params: dict, point_only: bool = False, tuning_days: int = 0, holdout: int = 0):
     hyperparameters = dict(params)
     steps = input_steps(params)
-    min_past = steps if model in GLUONTS_MODELS else 0
+    min_past = steps if "context_length" in params else 0
 
     def train(sensor: str, items: list[pd.Series], seed: int):
         from autogluon.timeseries import TimeSeriesPredictor
@@ -119,29 +123,25 @@ def autogluon_trainer(model: str, params: dict, point_only: bool = False, tuning
             from gluonts.transform import ExpectedNumInstanceSampler
             fitted["train_sampler"] = ExpectedNumInstanceSampler(num_instances=1.0, min_past=min_past,
                                                                  min_future=HORIZON)
-        info = {"training_rows": int(sum(len(i) for i in items))}
-        tuning = None
+        tuning, info = None, {}
         if tuning_days:
             items, tune = tuning_split(items, tuning_days, steps, holdout)
             tuning = _batch_frame(tune, prefix="tune")
-            info.update(training_rows=int(sum(len(i) for i in items)), tuning_days=tuning_days,
-                        holdout_steps=holdout, tuning_end=str(tune[0].index[-1]))
+            info = {"tuning_days": tuning_days, "holdout_steps": holdout, "tuning_end": str(tune[0].index[-1])}
+        info = {"training_rows": int(sum(len(i) for i in items)), **info}
         predictor.fit(_batch_frame(items, prefix="train"), tuning_data=tuning, hyperparameters={model: fitted},
                       enable_ensemble=False, skip_model_selection=True, random_seed=seed)
         if not predictor.model_names():  # AutoGluon logs a failed fit and skips the model instead of raising
             raise RuntimeError(f"AUTOGLUON TRAINED NO {model} MODEL FOR {sensor}")
         if params.get("keep_lightning_logs"):
             info.update(_lightning_epochs(Path(workdir.name)))
-        columns = ["mean"] * len(QUANTILE_LEVELS) if point_only else [str(level) for level in QUANTILE_LEVELS]
 
         def forecast(contexts: list[pd.Series], horizon: int, levels: tuple[float, ...],
                      seed: int) -> tuple[np.ndarray, list[str]]:
             if horizon != HORIZON or tuple(levels) != QUANTILE_LEVELS:
                 raise ValueError(f"TRAINED FOR HORIZON {HORIZON} AND {QUANTILE_LEVELS}")
             predictions = predictor.predict(_batch_frame(contexts), random_seed=seed)
-            quantiles = np.stack([predictions.loc[f"{i:06d}", columns].to_numpy(dtype=float)
-                                  for i in range(len(contexts))])
-            return quantiles, ["ok"] * len(contexts)
+            return _quantiles(predictions, len(contexts), QUANTILE_LEVELS, point_only), ["ok"] * len(contexts)
 
         forecast.workdir, forecast.predictor = workdir, predictor  # the folder lives as long as the forecaster
         return forecast, {"models": predictor.model_names(), **info}
@@ -158,16 +158,12 @@ RECURSIVE_TABULAR = {**TABULAR_COMMON, "differences": [SEASON], "target_scaler":
                      "model_hyperparameters": dict(LIGHTGBM)}
 # DeepAR: AutoGluon's network and training defaults written out (2 LSTM layers of 40, dropout 0.1, Student-t output,
 # mean scaling per window, 100 epochs of 50 batches of 64, learning rate 1e-3, patience 20, 250 sample paths).
-DEEPAR = {"context_length": 2 * SEASON, "lags_seq": list(LAGS), "time_features": [], "disable_static_features": True,
-          "disable_known_covariates": True, "num_layers": 2, "hidden_size": 40, "dropout_rate": 0.1, "scaling": True,
-          "max_epochs": 100, "num_batches_per_epoch": 50, "batch_size": 64, "lr": 1e-3, "early_stopping_patience": 20,
-          "predict_batch_size": 500, "keep_lightning_logs": True}
+DEEPAR = {"context_length": 2 * SEASON, "lags_seq": list(LAGS), "time_features": [], "num_layers": 2, "hidden_size": 40,
+          "dropout_rate": 0.1, "scaling": True, **GLUONTS_COMMON}
 DEEPAR_HOLDOUT = DEEPAR["context_length"] - 1  # context steps its validation loss scores before each validated day
 # PatchTST: AutoGluon's training defaults and GluonTS's network defaults written out (patches of 16 with stride 8,
 # padded at the end, 2 encoder layers of width 32 with 4 heads and feedforward 128, dropout 0.1, Student-t output,
 # mean scaling per window, weight decay 1e-8), with a one-week context instead of AutoGluon's 96 steps.
-PATCHTST = {"context_length": WEEK, "patch_len": 16, "stride": 8, "padding_patch": "end", "d_model": 32, "nhead": 4,
-            "dim_feedforward": 128, "num_encoder_layers": 2, "dropout": 0.1, "activation": "relu", "norm_first": False,
-            "scaling": "mean", "weight_decay": 1e-8, "disable_static_features": True, "disable_known_covariates": True,
-            "max_epochs": 100, "num_batches_per_epoch": 50, "batch_size": 64, "lr": 1e-3, "early_stopping_patience": 20,
-            "predict_batch_size": 500, "keep_lightning_logs": True}
+PATCHTST = {"context_length": BUCKETS_PER_WEEK, "patch_len": 16, "stride": 8, "padding_patch": "end", "d_model": 32,
+            "nhead": 4, "dim_feedforward": 128, "num_encoder_layers": 2, "dropout": 0.1, "activation": "relu",
+            "norm_first": False, "scaling": "mean", "weight_decay": 1e-8, **GLUONTS_COMMON}

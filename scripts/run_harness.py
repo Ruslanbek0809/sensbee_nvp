@@ -113,7 +113,7 @@ def main() -> None:
         if not set(contexts) <= set(baseline.contexts):
             parser.error(f"{args.model} runs only on contexts {list(baseline.contexts)} (days)")
         built, params = baseline.build()
-        if args.model in TRAINED:
+        if baseline.trained:
             trainer = built
         else:
             forecaster = built
