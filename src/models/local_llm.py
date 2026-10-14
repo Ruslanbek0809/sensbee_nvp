@@ -9,8 +9,8 @@ from typing import Dict, List, Optional, Tuple
 logger = logging.getLogger(__name__)
 
 # Global cache for loaded models to avoid reloading between requests.
-# Keyed on (model_name, device_str) so multi-GPU mode caches one instance per GPU.
-_model_cache: Dict[Tuple[str, str], Tuple] = {}
+# Keyed on (model_name, device_str, dtype, revision) so multi-GPU mode caches one instance per GPU.
+_model_cache: Dict[Tuple[str, str, Optional[str], Optional[str]], Tuple] = {}
 
 
 # Configuration for a local LLM model.
@@ -128,12 +128,17 @@ def get_device_backend() -> str:
 
 # Loads a local LLM model and tokenizer.
 # device: e.g. "cuda:0", "cuda:1". If None, uses device_map="auto" (model decides).
+# dtype: "float16", "float32" or "bfloat16" on any backend; None keeps the default (float32 on MPS, else the config's).
+# On MPS an explicit dtype loads the weights straight onto the GPU instead of loading on the CPU and moving them,
+# which holds two copies at once. revision: a Hugging Face commit to pin the weights; None takes the latest.
 def load_local_model(
     model_name: str,
     cache: bool = True,
     device: Optional[str] = None,
+    dtype: Optional[str] = None,
+    revision: Optional[str] = None,
 ):
-    cache_key = (model_name, device or "auto")
+    cache_key = (model_name, device or "auto", dtype, revision)
     if cache and cache_key in _model_cache:
         logger.debug(f"Using cached model: {model_name} on {device or 'auto'}")
         return _model_cache[cache_key]
@@ -198,7 +203,9 @@ def load_local_model(
         "float32": torch.float32,
         "bfloat16": torch.bfloat16,
     }
-    if device_backend == "mps":
+    if dtype is not None:
+        torch_dtype = dtype_map[dtype]
+    elif device_backend == "mps":
         torch_dtype = torch.float32  # MPS works best with float32 for better performance
     else:
         torch_dtype = dtype_map.get(config.torch_dtype, torch.float16)
@@ -208,7 +215,7 @@ def load_local_model(
     if device is not None and device_backend == "cuda":
         device_map = device
     elif device_backend == "mps":
-        device_map = None  # Load on CPU first, move to MPS later
+        device_map = "mps" if dtype is not None else None  # else: load on CPU first, move to MPS later
     elif device_backend == "cuda":
         device_map = config.device_map
     else:
@@ -218,6 +225,8 @@ def load_local_model(
     try:
         hf_cache = os.environ.get("TRANSFORMERS_CACHE") or os.environ.get("HF_HOME")
         cache_kwargs = {"cache_dir": hf_cache} if hf_cache else {}
+        if revision is not None:
+            cache_kwargs["revision"] = revision
 
         if config.model_type == "llama2":
             tokenizer = LlamaTokenizer.from_pretrained(
@@ -281,7 +290,7 @@ def load_local_model(
     logger.info(f"MODEL LOADED SUCCESSFULLY ON {actual_device}")
 
     if cache:
-        _model_cache[(model_name, device or "auto")] = (model, tokenizer)
+        _model_cache[cache_key] = (model, tokenizer)
 
     return model, tokenizer
 
@@ -352,6 +361,7 @@ def _get_usable_gpus(min_free_gb: float = 15.0) -> List[int]:
 #   each path on a separate device in parallel threads — close to N_gpu speedup.
 #   When only 1 GPU (or CPU) is available the single-device batched path is used.
 #   GPUs occupied by other processes (< 15 GiB free) are automatically skipped.
+#   multi_gpu=False always uses the single-device path (one device, batch_size honoured).
 def local_llm_completion(
     input_str: str,
     settings,  # SerializerSettings from serialize.py
@@ -362,12 +372,15 @@ def local_llm_completion(
     temperature: float = 0.9,
     top_p: float = 0.9,
     cache_model: bool = True,
+    dtype: Optional[str] = None,
+    revision: Optional[str] = None,
+    multi_gpu: bool = True,
 ) -> List[str]:
     import torch
 
     usable_gpus = _get_usable_gpus(min_free_gb=15.0)
 
-    if len(usable_gpus) > 1 and num_forecasts > 1:
+    if multi_gpu and len(usable_gpus) > 1 and num_forecasts > 1:
         try:
             return _generate_forecasts_multi_gpu(
                 input_str=input_str,
@@ -379,6 +392,8 @@ def local_llm_completion(
                 top_p=top_p,
                 cache_model=cache_model,
                 gpu_ids=usable_gpus,
+                dtype=dtype,
+                revision=revision,
             )
         except Exception as e:
             logger.warning(
@@ -396,6 +411,8 @@ def local_llm_completion(
         top_p=top_p,
         cache_model=cache_model,
         preferred_gpu=usable_gpus[0] if usable_gpus else None,
+        dtype=dtype,
+        revision=revision,
     )
 
 
@@ -410,11 +427,14 @@ def _generate_forecasts_single_device(
     top_p: float,
     cache_model: bool,
     preferred_gpu: Optional[int] = None,
+    dtype: Optional[str] = None,
+    revision: Optional[str] = None,
 ) -> List[str]:
     import torch
 
     device_arg = f"cuda:{preferred_gpu}" if preferred_gpu is not None else None
-    model, tokenizer = load_local_model(model_name, cache=cache_model, device=device_arg)
+    model, tokenizer = load_local_model(model_name, cache=cache_model, device=device_arg, dtype=dtype,
+                                        revision=revision)
 
     input_tokens = tokenizer.encode(input_str, add_special_tokens=False)
     num_input_steps = len(input_str.split(settings.time_sep))
@@ -486,6 +506,8 @@ def _generate_forecasts_multi_gpu(
     top_p: float,
     cache_model: bool,
     gpu_ids: List[int],
+    dtype: Optional[str] = None,
+    revision: Optional[str] = None,
 ) -> List[str]:
     import torch
     from concurrent.futures import ThreadPoolExecutor
@@ -503,15 +525,15 @@ def _generate_forecasts_multi_gpu(
     for idx, gpu_id in enumerate(gpu_ids):
         if paths_per_gpu[idx] > 0:
             device_str = f"cuda:{gpu_id}"
-            cache_key = (model_name, device_str)
+            cache_key = (model_name, device_str, dtype, revision)
             if cache_key not in _model_cache:
                 logger.info(f"Pre-loading {model_name} onto {device_str} ...")
-                load_local_model(model_name, cache=cache_model, device=device_str)
+                load_local_model(model_name, cache=cache_model, device=device_str, dtype=dtype, revision=revision)
 
     def generate_on_gpu(gpu_id: int, n_paths: int) -> List[str]:
         device_str = f"cuda:{gpu_id}"
         model, tokenizer = load_local_model(
-            model_name, cache=cache_model, device=device_str
+            model_name, cache=cache_model, device=device_str, dtype=dtype, revision=revision
         )
 
         input_tokens = tokenizer.encode(input_str, add_special_tokens=False)

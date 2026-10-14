@@ -18,7 +18,7 @@
 import logging
 import os
 from dataclasses import dataclass
-from typing import List, Optional, Tuple
+from typing import Callable, Dict, List, Optional, Tuple
 
 import numpy as np
 import pandas as pd
@@ -312,8 +312,20 @@ def aggregate_samples(
         raise ValueError(f"UNKNOWN AGGREGATION METHOD: {method}")
 
 
-# Generates forecast using LLM with hybrid approach.
-def nvp_llms_forecast(
+# Result of the LLMTime sampling steps: the valid samples on the model's scale (normalized when normalization is
+# used), the scaler that maps them back, the last observed value, and counts of completions, parse failures, samples
+# removed by each filter rule and valid samples.
+@dataclass
+class LLMTimeSamples:
+    samples: List[np.ndarray]
+    scaler: Scaler
+    last_value: float
+    counts: Dict[str, int]
+
+
+# Runs LLMTime steps 1-5 (scale, serialize, prompt, complete, parse and filter) and returns the valid samples.
+# complete: the completion function, called like call_llm_completion (the default).
+def llmtime_samples(
     series: pd.Series,
     horizon: int,
     provider: Optional[str] = None,
@@ -325,7 +337,8 @@ def nvp_llms_forecast(
     include_context: bool = False,
     alpha: float = 0.95,
     beta: float = 0.3,
-) -> np.ndarray:
+    complete: Optional[Callable[..., List[str]]] = None,
+) -> LLMTimeSamples:
     if len(series) == 0:
         raise ValueError("EMPTY SERIES")
     
@@ -398,7 +411,7 @@ def nvp_llms_forecast(
     # Use semantic prompt for API models when using raw values (semantic info preserved)
     use_semantic_prompt = (not is_local) and (not use_normalization)
     
-    completions = call_llm_completion(
+    completions = (complete or call_llm_completion)(
         prompt=prompt,
         settings=settings,
         provider=provider,
@@ -411,6 +424,8 @@ def nvp_llms_forecast(
     
     # Step 5: Parses completions with outlier filtering
     valid_samples = []
+    counts = {"completions": len(completions), "parse_failed": 0, "filtered_a": 0, "filtered_b": 0,
+              "filtered_c": 0, "filtered_d": 0}
     
     # Determines bounds based on normalization usage
     if use_normalization:
@@ -444,6 +459,7 @@ def nvp_llms_forecast(
 
         if parsed is None or len(parsed) == 0:
             logger.warning(f"FORECAST {i+1}: PARSING FAILED")
+            counts["parse_failed"] += 1
             continue
 
         # --- Filter (a): Out-of-bounds values ---
@@ -452,16 +468,19 @@ def nvp_llms_forecast(
                 f"FORECAST {i+1}: FILTERED (a) out-of-bounds "
                 f"[{parsed.min():.3f}, {parsed.max():.3f}] outside [{min_bound:.2f}, {max_bound:.2f}]"
             )
+            counts["filtered_a"] += 1
             continue
 
         # --- Filter (b): Constant or near-constant output (≤2 unique values) ---
         if len(np.unique(np.round(parsed, 3))) <= 2:
             logger.warning(f"FORECAST {i+1}: FILTERED (b) constant or near-constant (≤2 unique values)")
+            counts["filtered_b"] += 1
             continue
 
         # --- Filter (c): Flat output (std < 0.001) ---
         if float(np.std(parsed)) < 0.001:
             logger.warning(f"FORECAST {i+1}: FILTERED (c) flat output (std < 0.001)")
+            counts["filtered_c"] += 1
             continue
 
         # --- Filter (d): Perfectly linear trends (second derivative < 0.005) ---
@@ -469,6 +488,7 @@ def nvp_llms_forecast(
             second_diff = np.diff(parsed, 2)
             if np.all(np.abs(second_diff) < 0.005):
                 logger.warning(f"FORECAST {i+1}: FILTERED (d) perfectly linear (2nd deriv < 0.005)")
+                counts["filtered_d"] += 1
                 continue
 
         valid_samples.append(parsed)
@@ -477,10 +497,43 @@ def nvp_llms_forecast(
             f"RANGE [{parsed.min():.3f}, {parsed.max():.3f}] ✓"
         )
     
+    counts["valid"] = len(valid_samples)
+    return LLMTimeSamples(samples=valid_samples, scaler=scaler, last_value=float(values[-1]), counts=counts)
+
+
+# Generates forecast using LLM with hybrid approach.
+def nvp_llms_forecast(
+    series: pd.Series,
+    horizon: int,
+    provider: Optional[str] = None,
+    model: Optional[str] = None,
+    column_name: str = "value",
+    num_forecasts: int = 5,
+    temperature: float = 0.9,
+    use_normalization: bool = True,
+    include_context: bool = False,
+    alpha: float = 0.95,
+    beta: float = 0.3,
+) -> np.ndarray:
+    result = llmtime_samples(
+        series=series,
+        horizon=horizon,
+        provider=provider,
+        model=model,
+        column_name=column_name,
+        num_forecasts=num_forecasts,
+        temperature=temperature,
+        use_normalization=use_normalization,
+        include_context=include_context,
+        alpha=alpha,
+        beta=beta,
+    )
+    valid_samples = result.samples
+    
     if not valid_samples:
         # Fallback: if all samples filtered, use last value extrapolation
         logger.warning("ALL SAMPLES FILTERED. USING LAST VALUE FALLBACK.")
-        return np.full(horizon, values[-1])
+        return np.full(horizon, result.last_value)
     
     logger.info(f"VALID FORECASTS AFTER FILTERING: {len(valid_samples)}/{num_forecasts}")
     
@@ -489,7 +542,7 @@ def nvp_llms_forecast(
     
     # Step 7: Inverses transform
     if use_normalization:
-        forecast = scaler.inverse_transform(normalized_forecast)
+        forecast = result.scaler.inverse_transform(normalized_forecast)
     else:
         forecast = normalized_forecast
     

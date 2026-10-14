@@ -15,6 +15,7 @@ from typing import Callable, Optional
 
 from benchmark.models.autogluon_models import autogluon_forecaster
 from benchmark.models.chronos_models import chronos2_forecaster, chronos_bolt_forecaster
+from benchmark.models.llmtime_models import llmtime_forecaster
 from benchmark.models.moirai_models import moirai2_forecaster
 from benchmark.models.statsforecast_models import mstl_forecaster
 from benchmark.models.timesfm_models import timesfm25_forecaster
@@ -34,6 +35,7 @@ TIMESFM25 = ("google/timesfm-2.5-200m-pytorch", "1d952420fba87f3c6dee4f240de0f1a
 TIREX = ("NX-AI/TiRex", "63c740922493f5fbe60b277609ec62babfba2762")
 TOTO = ("Datadog/Toto-Open-Base-1.0", "0411ceb27bdf7fc3e4892e99edc8ad08192dc3c5")
 MOIRAI2_SMALL = ("Salesforce/moirai-2.0-R-small", "30f43ff08c8494f4943ae1521e9d4e94a0fbb389")
+MISTRAL_7B = ("mistralai/Mistral-7B-v0.1", "27d67f1b5f57dc0953326b2601d68371d40ea8da")
 PACKAGES = ("autogluon.timeseries", "statsforecast", "statsmodels", "scipy", "torch", "coreforecast", "joblib",
             "chronos-forecasting", "transformers", "huggingface_hub", "accelerate", "timesfm", "tirex-ts", "uni2ts",
             "lightgbm", "mlforecast", "gluonts", "lightning")
@@ -101,6 +103,14 @@ TRAINED: dict[str, Baseline] = {
     "ag_deepar": Baseline(lambda: autogluon_trainer("DeepAR", DEEPAR, tuning_days=TUNING_DAYS,
                                                     holdout=DEEPAR_HOLDOUT), (14, 28)),
     "ag_patchtst": Baseline(lambda: autogluon_trainer("PatchTST", PATCHTST, tuning_days=TUNING_DAYS), (14, 28)),
+}
+
+
+# LLMTime (Phase 3, the research project's method) with Mistral-7B-v0.1, local: the "LLMTime-like" setting of the
+# research project (5 samples, temperature 0.9, normalized) on 14-day contexts only (≈ 6-7k prompt tokens; the runs
+# use a fixed origin subset, --origin-stride). Kept apart from ZERO_SHOT so its integration tests don't load 14.5 GB.
+LLMTIME: dict[str, Baseline] = {
+    "llmtime_mistral7b": _zero_shot(llmtime_forecaster, MISTRAL_7B, (14,), "model-00001-of-00002.safetensors"),
 }
 
 

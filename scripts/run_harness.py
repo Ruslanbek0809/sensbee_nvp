@@ -5,8 +5,8 @@
 # folder under --out, then the mean metrics per sensor, context and horizon are printed: an in-house check forecaster
 # (naive / seasonal naive; harness checks, not thesis baselines) or a baseline from benchmark/models (AutoGluon /
 # statsforecast; needs the bench venv), or a zero-shot foundation model (Chronos-2, Chronos-Bolt, TimesFM 2.5, TiRex,
-# Toto; bench venv plus their downloaded weights; Moirai-2 in venv-moirai), or a trained model (fitted per sensor on
-# the data before the period; bench venv). A model runs on its own allowed context lengths unless --contexts picks
+# Toto; bench venv plus their downloaded weights; Moirai-2 in venv-moirai), a trained model (fitted per sensor on
+# the data before the period; bench venv), or LLMTime with a local LLM (bench venv plus its weights). A model runs on its own allowed context lengths unless --contexts picks
 # some of them; --origin-stride k evaluates every k-th valid origin. No network; reads only the snapshot (set
 # HF_HUB_OFFLINE=1 so model weights come only from the local cache).
 #
@@ -23,6 +23,8 @@
 #   HF_HUB_OFFLINE=1 venv-bench/bin/python scripts/run_harness.py --snapshot <dir> --out <dir> --model tirex
 #   HF_HUB_OFFLINE=1 venv-bench/bin/python scripts/run_harness.py --snapshot <dir> --out <dir> --model toto
 #   HF_HUB_OFFLINE=1 venv-moirai/bin/python scripts/run_harness.py --snapshot <dir> --out <dir> --model moirai2_small
+#   HF_HUB_OFFLINE=1 venv-bench/bin/python scripts/run_harness.py --snapshot <dir> --out <dir> --model llmtime_mistral7b \
+#       --sensors STUTZERBACH_WEATHER_STATION EISHALLE --origin-stride 7
 
 import argparse
 import sys
@@ -35,7 +37,7 @@ PROJECT_ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(PROJECT_ROOT))
 
 from benchmark.metrics import METRICS  # noqa: E402
-from benchmark.models import BASELINES, TRAINED, ZERO_SHOT, library_versions  # noqa: E402
+from benchmark.models import BASELINES, LLMTIME, TRAINED, ZERO_SHOT, library_versions  # noqa: E402
 from benchmark.runner import CHECK_FORECASTERS, run  # noqa: E402
 from benchmark.snapshot import load_snapshot  # noqa: E402
 from benchmark.tasks import CONTEXT_DAYS, TASKS, origin_table, target_series, validity_context_days  # noqa: E402
@@ -85,8 +87,8 @@ def main() -> None:
     parser = argparse.ArgumentParser(description="Benchmark harness on a frozen snapshot (no network)")
     parser.add_argument("--snapshot", type=Path, required=True, help="snapshot folder (with manifest.json)")
     parser.add_argument("--out", type=Path, help="parent folder; a new <run id> folder is created (not for --dry-run)")
-    parser.add_argument("--model", choices=[*CHECK_FORECASTERS, *BASELINES, *ZERO_SHOT, *TRAINED],
-                        help="check forecaster, baseline, zero-shot or trained model")
+    parser.add_argument("--model", choices=[*CHECK_FORECASTERS, *BASELINES, *ZERO_SHOT, *TRAINED, *LLMTIME],
+                        help="check forecaster, baseline, zero-shot, trained or LLMTime model")
     parser.add_argument("--dry-run", action="store_true", help="list the origins per sensor and write nothing")
     parser.add_argument("--sensors", nargs="+", choices=list(TASKS), default=list(TASKS))
     parser.add_argument("--period", choices=["test", "validation"], default="test")
@@ -104,7 +106,7 @@ def main() -> None:
     if args.out is None or args.model is None:
         parser.error("--out and --model are required unless --dry-run")
     model_info, forecaster, trainer = {}, None, None
-    models = {**BASELINES, **ZERO_SHOT, **TRAINED}
+    models = {**BASELINES, **ZERO_SHOT, **TRAINED, **LLMTIME}
     if args.model in models:
         baseline = models[args.model]
         contexts = baseline.contexts if requested is None else requested

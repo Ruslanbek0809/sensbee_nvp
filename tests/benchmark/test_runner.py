@@ -1,7 +1,7 @@
 # Tests for benchmark/runner.py on a tiny synthetic snapshot written to tmp_path (no network): the files and the
 # provenance of a run, the check forecasters, determinism by seed, no overwriting, that failed origins, fallbacks
 # and crossed quantiles are counted instead of dropped or hidden, the trainer hook of fitted models (once per sensor,
-# only data before the period, a failed fit fails the sensor) and the origin stride.
+# only data before the period, a failed fit fails the sensor), the origin stride and a forecaster's diagnostics.
 
 import json
 from pathlib import Path
@@ -296,3 +296,24 @@ def test_fit_info_is_made_plain_json_or_fails_the_fit_at_once(tmp_path):
     bad = _record(run(None, "b", snapshot_dir, tmp_path / "b", tasks=tasks, context_days=(1,), trainer=bad_info))
     assert "NOT JSON" in bad["counts"]["W"]["fit"]["error"]
     assert bad["counts"]["W"]["contexts"]["1d"]["failed"] == 13
+
+
+# A forecaster's drain_diagnostics() is called once per sensor, after all its contexts, and its counts are recorded.
+def test_forecaster_diagnostics_are_drained_into_the_sensor_counts(tmp_path):
+    snapshot_dir, tasks = _snapshot(tmp_path)
+    seen = {"origins": 0}
+
+    def counting(contexts, horizon, levels, seed):
+        seen["origins"] += len(contexts)
+        return naive_forecaster(contexts, horizon, levels, seed)
+
+    def drain():
+        counts = {"origins": np.int64(seen["origins"])}
+        seen["origins"] = 0
+        return counts
+
+    counting.drain_diagnostics = drain
+    record = _record(run(counting, "x", snapshot_dir, tmp_path / "runs", tasks=tasks, context_days=(1, 2)))
+    assert record["counts"]["W"]["diagnostics"] == {"origins": 26} and seen["origins"] == 0
+    assert "diagnostics" not in _record(run(naive_forecaster, "y", snapshot_dir, tmp_path / "runs", tasks=tasks,
+                                            context_days=(1,)))["counts"]["W"]

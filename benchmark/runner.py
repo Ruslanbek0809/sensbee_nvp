@@ -17,6 +17,8 @@
 # of that sensor (one frozen model per sensor and period). A trainer that raises, or whose fit info isn't plain JSON
 # (numpy scalars are converted), fails all origins of that sensor.
 # origin_stride=k keeps every k-th valid origin per sensor (a fixed subset for expensive models).
+# A forecaster may have a drain_diagnostics() method returning plain counts (e.g. LLMTime's filtered samples) and
+# resetting them: the runner calls it after each sensor and records the result in counts[sensor]["diagnostics"].
 
 import dataclasses
 import json
@@ -238,6 +240,9 @@ def run(forecaster: Optional[Forecaster], model: str, snapshot_dir: Path, out_ro
                     metric_rows.append({"sensor": sensor, "context": label, "origin": origin, "status": status[i],
                                         "context_steps": len(contexts[i]), "scale": scales[i], **row})
             forecast_frames.append(_forecast_frame(sensor, label, origins, status, targets, quantiles, levels))
+        if hasattr(sensor_forecaster, "drain_diagnostics"):
+            counts[sensor]["diagnostics"] = json.loads(json.dumps(sensor_forecaster.drain_diagnostics(),
+                                                                  default=_plain))
         logger.info(f"RAN {model} on {sensor}: {len(valid)} of {len(table)} origins valid, {len(origins)} evaluated")
 
     run_dir.mkdir(parents=True)
