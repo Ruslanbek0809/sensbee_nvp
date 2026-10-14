@@ -24,6 +24,7 @@ from benchmark.models.toto_models import toto_forecaster
 from benchmark.models.trained_models import (
     DEEPAR, DEEPAR_HOLDOUT, DIRECT_TABULAR, PATCHTST, RECURSIVE_TABULAR, TUNING_DAYS, autogluon_trainer,
 )
+from benchmark.covariates import KINDS as COVARIATE_KINDS
 from benchmark.tasks import SEASON
 
 WEEK = 7 * SEASON
@@ -76,12 +77,12 @@ BASELINES: dict[str, Baseline] = {
 # A zero-shot model pinned to one (model id, revision): its forecaster factory is built with that pin, and the cache
 # check of its tests looks for the weight file at the same pin.
 def _zero_shot(factory: Callable, pin: tuple[str, str], contexts: tuple[int, ...],
-               weight_file: str = "model.safetensors") -> Baseline:
-    return Baseline(lambda: factory(*pin), contexts, (*pin, weight_file))
+               weight_file: str = "model.safetensors", covariate_kinds: tuple[str, ...] = ()) -> Baseline:
+    return Baseline(lambda: factory(*pin), contexts, (*pin, weight_file), covariate_kinds=covariate_kinds)
 
 
 ZERO_SHOT: dict[str, Baseline] = {
-    "chronos2": _zero_shot(chronos2_forecaster, CHRONOS2, (1, 2, 7, 14, 28, 56, 85)),
+    "chronos2": _zero_shot(chronos2_forecaster, CHRONOS2, (1, 2, 7, 14, 28, 56, 85), covariate_kinds=COVARIATE_KINDS),
     # Chronos-Bolt reads at most 2,048 steps: its 28-day context is cut to the last 21.3 days by the model.
     "chronos_bolt_base": _zero_shot(chronos_bolt_forecaster, CHRONOS_BOLT_BASE, (1, 2, 7, 14, 28)),
     # TimesFM 2.5 reads up to 16,256 steps next to its 128-step output block, so 169 days (16,224 steps) is its longest.

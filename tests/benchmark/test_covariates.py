@@ -171,6 +171,19 @@ def test_only_the_oracle_set_has_oracle_columns():
                                     "temperature_STUTZERBACH_WEATHER_STATION"])
 
 
+# A window lists its known and oracle columns as future columns, never the past-only ones, so a model gets one input
+# schema per set even when an oracle column's future is all NaN.
+def test_a_window_lists_its_future_columns_by_kind():
+    frames = {s: _weather_raw(i) for i, s in enumerate(cov.STATIONS)}
+    origin = pd.Timestamp("2026-02-02 06:00")
+    assert _window("met", frames, origin).attrs["future_columns"] == list(cov.SUN)
+    later = frames[STATION]["created_at"] >= origin
+    frames[STATION].loc[later, list(cov.WEATHER_VARIABLES)] = np.nan  # no observed future of the oracle variables
+    oracle = _window("met_oracle", frames, origin)
+    assert oracle.attrs["future_columns"] == [*cov.SUN, *cov.WEATHER_VARIABLES]
+    assert oracle.loc[origin:, list(cov.WEATHER_VARIABLES)].isna().all().all()
+
+
 # Writes a snapshot with one visitor sensor "V" (the Monday pattern) and returns its folder and task (4-day test).
 def _visitor_snapshot(tmp_path: Path) -> tuple[Path, dict[str, SensorTask]]:
     snapshot_dir = tmp_path / "snapshot"

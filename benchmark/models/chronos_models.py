@@ -8,6 +8,13 @@
 # could see its own future. context_length is the model maximum (8192): the harness cuts the context, so the model
 # never truncates it. The 9 deciles are among the model's trained quantiles and are read out without interpolation.
 # Chronos-2 has no sampling, so the seed is unused (the runner records it).
+# Covariates (Phase 4): with covariate windows from the runner, each context goes in as a dict: "past_covariates" =
+# every covariate column over the context, "future_covariates" = the window's future columns (known and oracle;
+# attrs["future_columns"]) over the horizon. Past-only columns get no future key, so one call has one schema.
+# cross_learning=False still gives each dict (its target and covariates) its own group: batch items stay independent.
+# Checked 2026-10-14 (benchmark_data/spikes/*_phase4_4.1_gates/): passing the other stations as past covariates gives
+# the target row exactly the forecast of the joint 3-variate target; a past-only column passed as an all-NaN future
+# covariate differs by up to 1.1e-5, which is why the schema follows the window's kinds and not its NaNs.
 #
 # Chronos-Bolt is univariate, so series in a batch are independent by construction. It reads at most 2,048 steps
 # (21.3 days at 15 min) and cuts longer contexts itself: its "28-day" forecasts use the last 2,048 steps. It forecasts
@@ -16,11 +23,24 @@
 # deciles, read out without interpolation. Deterministic, so the seed is unused too.
 
 import logging
+from typing import Optional
 
 import numpy as np
 import pandas as pd
 
 logger = logging.getLogger(__name__)
+
+
+# One Chronos-2 dict input: the context as target, every covariate column over the context as past covariates, and
+# the window's future columns over the horizon as future covariates.
+def _covariate_input(context: pd.Series, window: pd.DataFrame, horizon: int) -> dict:
+    n = len(context)
+    if len(window) != n + horizon or not window.index[:n].equals(context.index):
+        raise ValueError("COVARIATE WINDOW DOES NOT MATCH ITS CONTEXT")
+    return {"target": context.to_numpy(dtype=np.float32),
+            "past_covariates": {c: window[c].iloc[:n].to_numpy(dtype=np.float32) for c in window.columns},
+            "future_covariates": {c: window[c].iloc[n:].to_numpy(dtype=np.float32)
+                                  for c in window.attrs["future_columns"]}}
 
 
 # Builds a Chronos-2 forecaster for one model id and revision, and returns it with the effective settings.
@@ -30,9 +50,12 @@ def chronos2_forecaster(model_id: str, revision: str, device: str = "cpu", batch
     pipeline = Chronos2Pipeline.from_pretrained(model_id, revision=revision, device_map=device, dtype=torch.float32)
     context_length = pipeline.model_context_length
 
-    def forecast(contexts: list[pd.Series], horizon: int, levels: tuple[float, ...],
-                 seed: int) -> tuple[np.ndarray, list[str]]:
-        inputs = [c.to_numpy(dtype=np.float32) for c in contexts]
+    def forecast(contexts: list[pd.Series], horizon: int, levels: tuple[float, ...], seed: int,
+                 covariates: Optional[list[pd.DataFrame]] = None) -> tuple[np.ndarray, list[str]]:
+        if covariates is None:
+            inputs = [c.to_numpy(dtype=np.float32) for c in contexts]
+        else:
+            inputs = [_covariate_input(c, w, horizon) for c, w in zip(contexts, covariates)]
         quantiles, _ = pipeline.predict_quantiles(inputs, prediction_length=horizon, quantile_levels=list(levels),
                                                   batch_size=batch_size, context_length=context_length,
                                                   cross_learning=False, limit_prediction_length=True)

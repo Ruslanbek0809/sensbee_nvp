@@ -192,8 +192,10 @@ def build(name: str, sensor: str, frames: dict[str, pd.DataFrame], series: pd.Se
 
 
 # What one forecast may see: rows for the context's timestamps (the frame cut at the origin, then forward-filled, as
-# contexts are) and the HORIZON steps from the origin on, with the future of "past" columns blanked. Raises when a
-# known column has a missing value (e.g. outside the holiday table).
+# contexts are) and the HORIZON steps from the origin on, with the future of "past" columns blanked. The window's
+# attrs["future_columns"] lists the known and oracle columns, so a model gets the same input schema for every window
+# of a set (an oracle column whose future is all NaN in one window stays a future column). Raises when a known column
+# has a missing value (e.g. outside the holiday table).
 def covariate_window(frame: pd.DataFrame, kinds: dict[str, str], origin: pd.Timestamp,
                      context_index: pd.DatetimeIndex) -> pd.DataFrame:
     past = frame.loc[: origin - STEP].ffill().reindex(context_index)
@@ -203,6 +205,7 @@ def covariate_window(frame: pd.DataFrame, kinds: dict[str, str], origin: pd.Time
     known = [column for column, kind in kinds.items() if kind == "known"]
     if window[known].isna().any().any():
         raise ValueError(f"KNOWN COVARIATES MISSING in the window of origin {origin}")
+    window.attrs["future_columns"] = [column for column, kind in kinds.items() if kind != "past"]
     return window
 
 
