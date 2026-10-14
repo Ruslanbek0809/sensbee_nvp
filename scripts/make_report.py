@@ -2,11 +2,13 @@
 # Builds the baseline report (benchmark/report.py) from harness run folders: per-cell means, relative errors and skill
 # against the reference, Diebold–Mariano tests, failures, negative-quantile shares and the clipped visitor sensitivity
 # table, plus summary.md. Reads only the run folders; writes a new folder under --out. Needs the bench venv
-# (statsmodels for the DM tests).
+# (statsmodels for the DM tests). --common-origins builds every table on the (sensor, origin) pairs that all runs
+# evaluated (e.g. a model run on an origin subset against the others on exactly those origins).
 #
 # Usage (from sensbee_nvp/):
 #   venv-bench/bin/python scripts/make_report.py --runs ../../benchmark_data/results/<run>... \
 #       --out ../../benchmark_data/reports
+#   venv-bench/bin/python scripts/make_report.py --runs <subset run> <other runs>... --out <dir> --common-origins
 
 import argparse
 import logging
@@ -24,9 +26,11 @@ def main() -> None:
     parser = argparse.ArgumentParser(description="Baseline report from harness runs (no network)")
     parser.add_argument("--runs", type=Path, nargs="+", required=True, help="run folders (one per model)")
     parser.add_argument("--out", type=Path, required=True, help="parent folder; a new <UTC>_report folder is created")
+    parser.add_argument("--common-origins", action="store_true",
+                        help="only the (sensor, origin) pairs that every run evaluated")
     args = parser.parse_args()
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s")
-    report_dir = make_report(args.runs, args.out, REFERENCE)
+    report_dir = make_report(args.runs, args.out, REFERENCE, common=args.common_origins)
     print((report_dir / "summary.md").read_text())
     print(f"REPORT WRITTEN to {report_dir}", file=sys.stderr)
 

@@ -1,6 +1,7 @@
 # Tests for benchmark/runner.py on a tiny synthetic snapshot written to tmp_path (no network): the files and the
-# provenance of a run, the check forecasters, determinism by seed, no overwriting, and that failed origins, fallbacks
-# and crossed quantiles are counted instead of dropped or hidden.
+# provenance of a run, the check forecasters, determinism by seed, no overwriting, that failed origins, fallbacks
+# and crossed quantiles are counted instead of dropped or hidden, the trainer hook of fitted models (once per sensor,
+# only data before the period, a failed fit fails the sensor) and the origin stride.
 
 import json
 from pathlib import Path
@@ -200,3 +201,82 @@ def test_contexts_of_different_lengths_are_forecast_one_length_per_call(make_con
 
     assert calls == [[192, 192], [96], [672]] and status == ["ok"] * 4
     np.testing.assert_array_equal(quantiles, whole)
+
+
+# A trainer that records what it was given and returns the naive forecaster; raises when fail is set.
+def _recording_trainer(calls: list, fail: bool = False):
+    def train(sensor, items, seed):
+        calls.append((sensor, [item.copy() for item in items], seed))
+        if fail:
+            raise RuntimeError("fit diverged")
+        return naive_forecaster, {"epochs": 3}
+    return train
+
+
+def test_a_trainer_is_fitted_once_per_sensor_on_data_before_the_period(tmp_path):
+    snapshot_dir, tasks = _snapshot(tmp_path)
+    calls = []
+    trained = run(None, "trained", snapshot_dir, tmp_path / "a", tasks=tasks, context_days=(1, 7), seed=5,
+                  trainer=_recording_trainer(calls))
+    plain = run(naive_forecaster, "naive", snapshot_dir, tmp_path / "b", tasks=tasks, context_days=(1, 7))
+
+    assert len(calls) == 1 and calls[0][0] == "W" and calls[0][2] == 5
+    (item,) = calls[0][1]  # 31 gap-free days before the test start
+    assert item.index[0] == TIMES[0] and item.index[-1] == pd.Timestamp("2026-01-31 23:45")
+    record = _record(trained)
+    fit = record["counts"]["W"]["fit"]
+    assert fit["cutoff"].startswith("2026-02-01") and fit["items"] == 1 and fit["steps"] == 31 * 96
+    assert fit["epochs"] == 3 and fit["fit_s"] >= 0
+    assert record["trained"] is True and _record(plain)["trained"] is False
+    assert record["forecasts_sha256"] == _record(plain)["forecasts_sha256"]  # the trained forecaster is used
+
+
+def test_data_at_or_after_the_period_start_never_reaches_the_trainer(tmp_path):
+    pattern = np.round(10 + 5 * np.sin(np.arange(96) * 2 * np.pi / 96), 3)
+    values = np.tile(pattern, len(TIMES) // 96)
+    changed = np.where(TIMES >= pd.Timestamp("2026-02-01"), values + 1000, values)
+    seen = []
+    for name, data in (("a", values), ("b", changed)):
+        calls = []
+        snapshot_dir, tasks = _write_snapshot(tmp_path / name, data)
+        run(None, "trained", snapshot_dir, tmp_path / name / "runs", tasks=tasks, context_days=(1,),
+            trainer=_recording_trainer(calls))
+        seen.append(calls[0][1])
+    assert len(seen[0]) == len(seen[1]) == 1
+    pd.testing.assert_series_equal(seen[0][0], seen[1][0])
+
+
+def test_a_failed_fit_fails_every_origin_of_that_sensor(tmp_path):
+    snapshot_dir, tasks = _snapshot(tmp_path)
+    run_dir = run(None, "trained", snapshot_dir, tmp_path / "runs", tasks=tasks, context_days=(1, 7),
+                  trainer=_recording_trainer([], fail=True))
+
+    counts = _record(run_dir)["counts"]["W"]
+    assert counts["fit"]["error"] == "RuntimeError: fit diverged"
+    assert counts["contexts"]["1d"] == counts["contexts"]["7d"] == {"ok": 0, "fallback": 0, "failed": 13,
+                                                                     "crossed_steps": 0}
+    forecasts = pd.read_csv(run_dir / "forecasts.csv.gz")
+    assert len(forecasts) == 13 * 2 * 96 and forecasts[QUANTILE_COLUMNS].isna().all().all()
+
+
+def test_origin_stride_keeps_every_kth_valid_origin(tmp_path):
+    snapshot_dir, tasks = _snapshot(tmp_path)
+    run_dir = run(naive_forecaster, "naive", snapshot_dir, tmp_path / "runs", tasks=tasks, context_days=(1,),
+                  origin_stride=4)
+
+    record = _record(run_dir)
+    assert record["origin_stride"] == 4 and "origin_stride" not in record["settings"]
+    assert record["counts"]["W"]["valid"] == 13 and record["counts"]["W"]["evaluated"] == 4
+    origins = pd.read_csv(run_dir / "forecasts.csv.gz", parse_dates=["origin"])["origin"].unique()
+    # Origins 0, 4, 8 and 12 of the 6-h grid.
+    assert list(origins) == list(pd.date_range("2026-02-01", periods=4, freq="24h"))
+
+
+def test_run_needs_exactly_one_of_forecaster_and_trainer_and_a_positive_stride(tmp_path):
+    snapshot_dir, tasks = _snapshot(tmp_path)
+    with pytest.raises(ValueError, match="EITHER"):
+        run(None, "x", snapshot_dir, tmp_path / "a", tasks=tasks)
+    with pytest.raises(ValueError, match="EITHER"):
+        run(naive_forecaster, "x", snapshot_dir, tmp_path / "b", tasks=tasks, trainer=_recording_trainer([]))
+    with pytest.raises(ValueError, match="STRIDE"):
+        run(naive_forecaster, "x", snapshot_dir, tmp_path / "c", tasks=tasks, origin_stride=0)

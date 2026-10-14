@@ -29,11 +29,14 @@ SEASON = BUCKETS_PER_DAY                   # daily season of the MASE/SQL scale 
 SCALE_DAYS = 28                            # history before an origin that the MASE/SQL scale is computed on
 VALIDATION_DAYS = 28
 CLOSURE_GAP_BUCKETS = CLOSURE_GAP_MINUTES // BUCKET_MINUTES  # visitors: ffill up to 120 min, then 0 (recorded in run.json)
+TRAIN_GAP_BUCKETS = BUCKETS_PER_DAY        # training data: gaps longer than 24 h split it, shorter ones are filled
+MIN_TRAIN_DAYS = 14                        # training pieces shorter than this are dropped
 
 
 # One sensor's forecasting task. kind: "regular" (weather; gaps stay NaN), "visitors" (event counter that resets
 # overnight; service fill rule) or "counter" (drifting entry/exit counter; forward-filled). Periods are naive UTC;
 # validation is the VALIDATION_DAYS before test_start. exclusions: (start, end, reason), [start, end), naive UTC.
+# train_start: where a fitted model's training data begins (None = the start of the series).
 @dataclass(frozen=True)
 class SensorTask:
     column: str
@@ -43,6 +46,7 @@ class SensorTask:
     test_end: str
     exclusions: tuple[tuple[str, str, str], ...] = ()
     secondary: bool = False
+    train_start: Optional[str] = None
 
 
 # Periods where event sensors were silent because of an outage, not because nothing happened. Found by listing the
@@ -56,13 +60,17 @@ PARKING_SILENCE = ("2026-04-02 09:45", "2026-04-04 08:45",
 
 # Test = 56 days: the last 8 weeks of the snapshot for weather, of the season for the halls (last open day: Eishalle
 # 28 Mar, Schwimmhalle 13 May 2026) and before the parking sensor stopped (17 Apr 2026). Parking is secondary: a
-# drifting entry/exit counter, reported on its own and left out of the cross-sensor aggregate.
+# drifting entry/exit counter, reported on its own and left out of the cross-sensor aggregate. The halls' training
+# data starts at the first open day of the 2025/26 season (2025-10-10, the first nonzero bucket of the shared visitor
+# stream; before it only zeros and two stray test days), so a fitted model doesn't learn the closed summer.
 TASKS: dict[str, SensorTask] = {
     "MANEBACH_WEATHER_STATION": SensorTask("temperature", "AVG", "regular", "2026-08-06", "2026-10-01"),
     "STUTZERBACH_WEATHER_STATION": SensorTask("temperature", "AVG", "regular", "2026-08-06", "2026-10-01"),
     "FRAUENWALD_WEATHER_STATION": SensorTask("temperature", "AVG", "regular", "2026-08-06", "2026-10-01"),
-    "EISHALLE": SensorTask("visitors_total", "MAX", "visitors", "2026-02-01", "2026-03-29", (STREAM_OUTAGE,)),
-    "SCHWIMMHALLE": SensorTask("visitors_total", "MAX", "visitors", "2026-03-19", "2026-05-14", (STREAM_OUTAGE,)),
+    "EISHALLE": SensorTask("visitors_total", "MAX", "visitors", "2026-02-01", "2026-03-29", (STREAM_OUTAGE,),
+                           train_start="2025-10-10"),
+    "SCHWIMMHALLE": SensorTask("visitors_total", "MAX", "visitors", "2026-03-19", "2026-05-14", (STREAM_OUTAGE,),
+                               train_start="2025-10-10"),
     "PARKPLATZ_EAZ": SensorTask("Fahrzeuge_auf_Parkplatz", "AVG", "counter", "2026-02-20", "2026-04-17",
                                 (STREAM_OUTAGE, PARKING_SILENCE), secondary=True),
 }
@@ -178,3 +186,21 @@ def scale_history(series: pd.Series, origin: pd.Timestamp, task: SensorTask) -> 
 # (e.g. Schwimmhalle's validation lies inside Eishalle's test, and both share one event stream).
 def training_series(series: pd.Series, cutoff: pd.Timestamp) -> pd.Series:
     return series.loc[: pd.Timestamp(cutoff) - STEP]
+
+
+# Training items for a fitted model: the series from task.train_start to strictly before the cutoff (training_series),
+# cut into gap-free pieces. Exclusions and gaps longer than TRAIN_GAP_BUCKETS split the series; shorter gaps are
+# forward-filled (the context rule), and pieces shorter than MIN_TRAIN_DAYS are dropped, so a model never learns long
+# flat filled stretches or an outage. Every piece lies on the complete 15-min grid.
+def training_items(series: pd.Series, task: SensorTask, cutoff: pd.Timestamp) -> list[pd.Series]:
+    history = training_series(series, cutoff)
+    if task.train_start is not None:
+        history = history.loc[pd.Timestamp(task.train_start):]
+    missing = history.isna()
+    run_length = missing.groupby((missing != missing.shift()).cumsum()).transform("size")
+    split = missing & (run_length > TRAIN_GAP_BUCKETS)
+    for start, end, _ in task.exclusions:
+        split |= (history.index >= pd.Timestamp(start)) & (history.index < pd.Timestamp(end))
+    pieces = history[~split].groupby(split.cumsum()[~split])
+    items = [piece.ffill().dropna() for _, piece in pieces]
+    return [item for item in items if len(item) >= MIN_TRAIN_DAYS * BUCKETS_PER_DAY]

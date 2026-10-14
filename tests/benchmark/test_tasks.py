@@ -1,6 +1,7 @@
 # Tests for benchmark/tasks.py on synthetic rows (no snapshot, no network): the fill rule of each sensor kind, equality
 # with the service loader (only SensbeeClient.get_sensor_data is patched, with autospec), origins and periods, the
-# validity reasons, the scale's exclusions, and that nothing at or after an origin reaches its context or scale.
+# validity reasons, the scale's exclusions, that nothing at or after an origin reaches its context or scale, and the
+# training items of fitted models (gap splits, minimum length, train_start, exclusions).
 
 import dataclasses
 import math
@@ -14,7 +15,7 @@ import pytest
 from benchmark.metrics import seasonal_scale
 from benchmark.tasks import (
     GUARD, TASKS, SensorTask, candidate_origins, context_window, origin_table, period_bounds, scale_history,
-    target_series, target_window, training_series,
+    target_series, target_window, training_items, training_series,
 )
 from src.data_access.sensbee_client import SensbeeClient, load_sensor_series_from_api
 
@@ -196,3 +197,62 @@ def test_nothing_at_or_after_the_origin_reaches_context_or_scale(kind):
     assert target.index[0] == origin and len(target) == 96
     # The change is real, just not visible before the origin (equal_nan: weather keeps its gap in the target).
     assert not np.allclose(target, target_window(changed_series, origin), equal_nan=True)
+
+
+# The 60 days of _weather_with_gaps() plus a 3-h gap on 2026-01-10 (filled) and a 2-day gap from
+# 2026-01-20 (a split), cut at 2026-02-25: pieces 2026-01-01 → 01-20 (19 d) and 01-22 → 02-25 (34 d).
+def test_training_items_split_long_gaps_and_fill_short_ones():
+    raw = _weather_with_gaps()
+    times = raw["created_at"]
+    short = (times >= "2026-01-10 06:00") & (times < "2026-01-10 09:00")
+    long = (times >= "2026-01-20") & (times < "2026-01-22")
+    raw = raw[~short & ~long]
+    task = SensorTask("temperature", "AVG", "regular", "2026-02-25", "2026-03-01")
+    series = target_series(raw, task)
+    items = training_items(series, task, pd.Timestamp("2026-02-25"))
+
+    assert [(str(i.index[0]), str(i.index[-1])) for i in items] == [
+        ("2026-01-01 00:00:00", "2026-01-19 23:45:00"), ("2026-01-22 00:00:00", "2026-02-24 23:45:00")]
+    for item in items:
+        assert not item.isna().any()
+        assert (item.index.to_series().diff().dropna() == pd.Timedelta("15min")).all()  # complete grid
+    # The 3-h gap is forward-filled with the last value before it; the planted 1-bucket and 1-day gaps (2026-02-10,
+    # 2026-02-15) are inside the second piece and filled the same way.
+    gap = items[0].loc["2026-01-10 06:00":"2026-01-10 08:45"]
+    assert (gap == series.loc["2026-01-10 05:45"]).all()
+    assert items[1].loc["2026-02-15"].nunique() == 1
+
+
+def test_training_items_drop_short_pieces_and_respect_train_start_and_exclusions():
+    times = pd.date_range("2025-12-01", "2026-03-01", freq="15min", inclusive="left")
+    raw = pd.DataFrame({"created_at": times, "c": np.arange(len(times), dtype=float)})
+    # A 1-h outage on 2026-01-15 splits even though it is short; train_start cuts December; the piece 2026-02-20 →
+    # 02-25 after a 2-day gap is shorter than 14 days and dropped.
+    raw = raw[(raw["created_at"] < "2026-02-18") | (raw["created_at"] >= "2026-02-20")]
+    task = SensorTask("c", "AVG", "regular", "2026-02-25", "2026-03-01",
+                      exclusions=(("2026-01-15 10:00", "2026-01-15 11:00", "test outage"),), train_start="2026-01-01")
+    items = training_items(target_series(raw, task), task, pd.Timestamp("2026-02-25"))
+
+    assert [(str(i.index[0]), str(i.index[-1])) for i in items] == [
+        ("2026-01-01 00:00:00", "2026-01-15 09:45:00"), ("2026-01-15 11:00:00", "2026-02-17 23:45:00")]
+
+
+@pytest.mark.parametrize("kind", ["regular", "visitors", "counter"])
+def test_training_items_never_reach_the_cutoff(kind):
+    raw = _weather_with_gaps()
+    cutoff = pd.Timestamp("2026-02-20 06:00")
+    task = SensorTask("temperature", "MAX", kind, "2026-02-21", "2026-03-01")
+    changed = raw.assign(temperature=np.where(raw["created_at"] >= cutoff, raw["temperature"] + 1000,
+                                              raw["temperature"]))
+    items = training_items(target_series(raw, task), task, cutoff)
+    changed_items = training_items(target_series(changed, task), task, cutoff)
+
+    assert items[-1].index[-1] == cutoff - pd.Timedelta("15min")
+    assert len(items) == len(changed_items)
+    for a, b in zip(items, changed_items):
+        pd.testing.assert_series_equal(a, b)
+
+
+def test_hall_training_starts_at_the_season_start():
+    assert TASKS["EISHALLE"].train_start == TASKS["SCHWIMMHALLE"].train_start == "2025-10-10"
+    assert all(task.train_start is None for name, task in TASKS.items() if task.kind != "visitors")

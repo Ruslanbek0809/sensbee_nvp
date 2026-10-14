@@ -5,7 +5,9 @@
 # module imports in the service venv too. Zero-shot foundation models (ZERO_SHOT) are kept apart from the baselines:
 # they need downloaded weights, so their tests run only with -m integration. Each is pinned to a Hugging Face model id
 # and revision, and runs on every context length its model can read: 1 to 28 days for all of them (2 days checks
-# whether two daily cycles help over one), longer ones only for the models whose context limit allows them.
+# whether two daily cycles help over one), longer ones only for the models whose context limit allows them. Trained
+# models (TRAINED) build a trainer instead of a forecaster: the runner fits one model per sensor on the data before the
+# period (benchmark/runner.py header).
 
 from dataclasses import dataclass
 from importlib.metadata import PackageNotFoundError, version
@@ -33,8 +35,9 @@ PACKAGES = ("autogluon.timeseries", "statsforecast", "statsmodels", "scipy", "to
             "chronos-forecasting", "transformers", "huggingface_hub", "accelerate", "timesfm", "tirex-ts", "uni2ts")
 
 
-# One baseline: build() → (forecaster, parameters); contexts: the allowed context lengths in days; weights: for a
-# zero-shot model, (model id, revision, weight file name) in the Hugging Face cache.
+# One baseline: build() → (forecaster, parameters), or (trainer, parameters) for a TRAINED model; contexts: the
+# allowed context lengths in days; weights: for a zero-shot model, (model id, revision, weight file name) in the
+# Hugging Face cache.
 @dataclass(frozen=True)
 class Baseline:
     build: Callable
@@ -81,6 +84,10 @@ ZERO_SHOT: dict[str, Baseline] = {
     # Moirai-2 reads up to 512 tokens of 16 steps, more than 28 days need; it runs only in venv-moirai (uni2ts).
     "moirai2_small": _zero_shot(moirai2_forecaster, MOIRAI2_SMALL, (1, 2, 7, 14, 28)),
 }
+
+
+# Trained models (Phase 3): one model per sensor, fitted on the data before the period and frozen. Filled per step.
+TRAINED: dict[str, Baseline] = {}
 
 
 # Versions of the libraries behind the baselines, for run.json.

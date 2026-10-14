@@ -7,16 +7,22 @@
 # status "ok" or "fallback" (the forecaster reports its own fallbacks). Batch items are independent: a forecast may use
 # only its own context, so no cross-series learning across origins, whose contexts hold earlier origins' targets.
 # All contexts of one call have the same length: the runner splits a batch by length (only "all history" contexts
-# differ), so an adapter never has to pad. Fitted models get training data only through tasks.training_series(). An
-# origin is "failed" when the forecaster raises (the runner then retries the origins one by one), returns the wrong
-# shape, or returns NaN or inf. Crossing quantiles are counted, then sorted for every model, so scores don't depend on
-# which adapter sorts.
+# differ), so an adapter never has to pad. An origin is "failed" when the forecaster raises (the runner then retries
+# the origins one by one), returns the wrong shape, or returns NaN or inf. Crossing quantiles are counted, then sorted
+# for every model, so scores don't depend on which adapter sorts.
+#
+# Trained models: instead of a forecaster, run() takes a trainer(sensor, items, seed) -> (forecaster, fit info), called
+# once per sensor with tasks.training_items() before the start of the run's period (the cutoff), so a fitted model
+# never sees data at or after the period start; the forecaster it returns is then used for every origin and context
+# of that sensor (one frozen model per sensor and period). A trainer that raises fails all origins of that sensor.
+# origin_stride=k keeps every k-th valid origin per sensor (a fixed subset for expensive models).
 
 import dataclasses
 import json
 import logging
 import os
 import platform
+import time
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Callable, Optional
@@ -30,8 +36,8 @@ from benchmark.snapshot import (
 )
 from benchmark.tasks import (
     CLOSURE_GAP_BUCKETS, CONTEXT_DAYS, GUARD, HORIZON, MIN_CONTEXT_COVERAGE, ORIGIN_FREQ, QUANTILE_LEVELS,
-    REPORT_STEPS, SCALE_DAYS, SEASON, TASKS, VALIDATION_DAYS, SensorTask, context_window, origin_table, scale_history,
-    target_series, target_window, validity_context_days,
+    REPORT_STEPS, SCALE_DAYS, SEASON, TASKS, VALIDATION_DAYS, SensorTask, context_window, origin_table, period_bounds,
+    scale_history, target_series, target_window, training_items, validity_context_days,
 )
 
 logger = logging.getLogger(__name__)
@@ -39,6 +45,7 @@ logger = logging.getLogger(__name__)
 STATUSES = ("ok", "fallback")
 
 Forecaster = Callable[[list[pd.Series], int, tuple[float, ...], int], tuple[np.ndarray, list[str]]]
+Trainer = Callable[[str, list[pd.Series], int], tuple[Forecaster, dict]]
 
 
 # Naive check forecaster: every step and every quantile is the last context value.
@@ -138,15 +145,38 @@ def _forecast_frame(sensor: str, context: str, origins: list[pd.Timestamp], stat
     })
 
 
-# Runs a forecaster over the given tasks (default: all TASKS) for one period and context lengths (days; None = all
-# history before the origin), and writes the results to out_root/<run_id>. run_id defaults to
-# "<UTC start time>_<model>". Origin validity covers CONTEXT_DAYS plus the run's own context lengths, so a longer
-# context is checked too; with the default contexts the origins are the same as before. Raises FileExistsError if that
-# folder exists. Returns the run folder.
-def run(forecaster: Forecaster, model: str, snapshot_dir: Path, out_root: Path,
+# Fits one sensor's model with the trainer on the training items before the cutoff. Returns the forecaster (None when
+# the trainer raised) and the fit record for run.json: cutoff, items, steps, span, fit seconds and the trainer's info.
+def _fit(trainer: Trainer, sensor: str, series: pd.Series, task: SensorTask, cutoff: pd.Timestamp,
+         seed: int) -> tuple[Optional[Forecaster], dict]:
+    items = training_items(series, task, cutoff)
+    record = {"cutoff": cutoff.strftime(TIME_FORMAT), "items": len(items), "steps": int(sum(len(i) for i in items)),
+              "first": items[0].index[0].strftime(TIME_FORMAT) if items else None,
+              "last": items[-1].index[-1].strftime(TIME_FORMAT) if items else None}
+    started = time.perf_counter()
+    try:
+        forecaster, info = trainer(sensor, items, seed)
+    except Exception as exc:
+        logger.warning(f"FIT FAILED for {sensor} ({type(exc).__name__}: {exc}); ALL ITS ORIGINS FAIL")
+        forecaster, info = None, {"error": f"{type(exc).__name__}: {exc}"}
+    return forecaster, {**record, "fit_s": round(time.perf_counter() - started, 3), **info}
+
+
+# Runs a forecaster (or, for a trained model, a trainer: see the header) over the given tasks (default: all TASKS) for
+# one period and context lengths (days; None = all history before the origin), and writes the results to
+# out_root/<run_id>. run_id defaults to "<UTC start time>_<model>". Origin validity covers CONTEXT_DAYS plus the run's
+# own context lengths, so a longer context is checked too; with the default contexts the origins are the same as
+# before. origin_stride=k evaluates every k-th valid origin. Raises FileExistsError if that folder exists. Returns the
+# run folder.
+def run(forecaster: Optional[Forecaster], model: str, snapshot_dir: Path, out_root: Path,
         tasks: Optional[dict[str, SensorTask]] = None, period: str = "test",
         context_days: tuple[Optional[int], ...] = CONTEXT_DAYS, seed: int = 0, run_id: Optional[str] = None,
-        model_params: Optional[dict] = None, model_info: Optional[dict] = None) -> Path:
+        model_params: Optional[dict] = None, model_info: Optional[dict] = None, trainer: Optional[Trainer] = None,
+        origin_stride: int = 1) -> Path:
+    if (forecaster is None) == (trainer is None):
+        raise ValueError("GIVE EITHER A FORECASTER OR A TRAINER")
+    if origin_stride < 1:
+        raise ValueError(f"ORIGIN STRIDE {origin_stride} MUST BE AT LEAST 1")
     tasks = TASKS if tasks is None else tasks
     started = datetime.now(timezone.utc)
     code = git_state()  # at the start: the code that runs, even if a commit happens during a long run
@@ -163,19 +193,28 @@ def run(forecaster: Forecaster, model: str, snapshot_dir: Path, out_root: Path,
         series = target_series(frames[sensor], task)
         table = origin_table(series, task, period, context_days)
         origin_frames.append(table.assign(sensor=sensor))
-        origins = list(table.loc[table["valid"], "origin"])
+        valid = list(table.loc[table["valid"], "origin"])
+        origins = valid[::origin_stride]
         scales = [seasonal_scale(scale_history(series, origin, task), SEASON) for origin in origins]
         targets = np.array([target_window(series, origin).to_numpy(dtype=float) for origin in origins]).reshape(
             len(origins), HORIZON)
-        counts[sensor] = {"candidates": len(table), "valid": len(origins),
+        counts[sensor] = {"candidates": len(table), "valid": len(valid), "evaluated": len(origins),
                           "reasons": {reason: int(n) for reason, n in table["reason"].value_counts().items()},
                           "undefined_scale": int(np.isnan(scales).sum()), "contexts": {}}
+        sensor_forecaster = forecaster
+        if trainer is not None and origins:
+            sensor_forecaster, counts[sensor]["fit"] = _fit(trainer, sensor, series, task,
+                                                            period_bounds(task, period)[0], seed)
         for days in context_days:
             label = "all" if days is None else f"{days}d"
             contexts = [context_window(series, origin, None if days is None else days * BUCKETS_PER_DAY)
                         for origin in origins]
-            quantiles, status = _predict(forecaster, contexts, levels, seed) if origins else (
-                np.empty((0, HORIZON, len(levels))), [])
+            if sensor_forecaster is None:  # the fit failed (or nothing to forecast)
+                quantiles, status = np.full((len(origins), HORIZON, len(levels)), np.nan), ["failed"] * len(origins)
+            elif origins:
+                quantiles, status = _predict(sensor_forecaster, contexts, levels, seed)
+            else:
+                quantiles, status = np.empty((0, HORIZON, len(levels))), []
             crossed = int(np.any(np.diff(quantiles, axis=-1) < 0, axis=-1).sum())
             quantiles = np.sort(quantiles, axis=-1)
             counts[sensor]["contexts"][label] = {**{s: status.count(s) for s in (*STATUSES, "failed")},
@@ -189,7 +228,7 @@ def run(forecaster: Forecaster, model: str, snapshot_dir: Path, out_root: Path,
                     metric_rows.append({"sensor": sensor, "context": label, "origin": origin, "status": status[i],
                                         "context_steps": len(contexts[i]), "scale": scales[i], **row})
             forecast_frames.append(_forecast_frame(sensor, label, origins, status, targets, quantiles, levels))
-        logger.info(f"RAN {model} on {sensor}: {len(origins)} of {len(table)} origins valid")
+        logger.info(f"RAN {model} on {sensor}: {len(valid)} of {len(table)} origins valid, {len(origins)} evaluated")
 
     run_dir.mkdir(parents=True)
     forecasts_sha256 = write_raw_csv(pd.concat(forecast_frames, ignore_index=True), run_dir / "forecasts.csv.gz")
@@ -208,6 +247,8 @@ def run(forecaster: Forecaster, model: str, snapshot_dir: Path, out_root: Path,
         "period": period,
         "context_days": [days if days is not None else "all" for days in context_days],
         "validity_context_days": list(validity_context_days(context_days)),
+        "origin_stride": origin_stride,
+        "trained": trainer is not None,
         "settings": {
             "horizon": HORIZON, "report_steps": list(REPORT_STEPS), "quantile_levels": list(levels),
             "origin_freq": ORIGIN_FREQ, "guard_hours": GUARD / pd.Timedelta("1h"),

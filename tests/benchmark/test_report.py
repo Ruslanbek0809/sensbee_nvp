@@ -1,7 +1,7 @@
 # Tests for benchmark/report.py on tiny harness runs over a synthetic snapshot (no network): the files, the reference
 # against itself, refusal of mixed snapshots, point-only models without probabilistic metrics, failed origins left
-# unimputed, the negative-quantile share and the clipped visitor table on a hand example, and the Diebold–Mariano
-# sign. The report always runs the DM tests, which need statsmodels: these tests run in the bench venv only.
+# unimputed, the negative-quantile share and the clipped visitor table on a hand example, the Diebold–Mariano sign,
+# and the common-origin report for a run on an origin subset. The report always runs the DM tests, which need statsmodels: these tests run in the bench venv only.
 
 import json
 from pathlib import Path
@@ -149,3 +149,38 @@ def test_dm_statistic_is_negative_for_a_model_with_lower_losses():
     table = dm_tests(pd.DataFrame(rows), records, ("ref", 1)).query("model == 'good'")
     assert len(table) == 2 * len(REPORT_STEPS)
     assert (table["statistic"] < 0).all() and (table["pvalue"] < 0.05).all()
+
+
+
+def test_common_origins_score_every_model_on_the_subset_runs_origins(tmp_path):
+    # Noisy visitors with closed nights (a finite, origin-specific scale, so MASE pairs exist).
+    noise = np.random.default_rng(0).normal(0, 3, len(TIMES))
+    snapshot_dir, tasks = _snapshot(tmp_path, visitors=np.maximum((np.tile(PATTERN, len(TIMES) // 96) - 10) * 20
+                                                                  + noise, 0))
+    full = run(seasonal_naive_forecaster(96), "snaive", snapshot_dir, tmp_path / "runs", tasks=tasks,
+               context_days=(1,), run_id="snaive")
+    subset = run(_negative_forecaster, "subset", snapshot_dir, tmp_path / "runs", tasks={"V": tasks["V"]},
+                 context_days=(1,), run_id="subset", origin_stride=4)  # 4 of 13 origins, visitors only
+    report = make_report([full, subset], tmp_path / "reports", ("snaive", 1), tasks=tasks, report_id="r",
+                         common=True)
+
+    cells = pd.read_csv(report / "cells.csv")
+    assert set(cells["sensor"]) == {"V"} and (cells["n_origins"] == 4).all()
+    relative = pd.read_csv(report / "relative.csv")
+    assert (relative["n_origins"] == 4).all() and relative["relative_error"].notna().all()
+    # The clipped table uses only the 4 common origins: clipped at 0, the subset's MAE over 24 h is the mean of y.
+    clipped = pd.read_csv(report / "clipped_visitors.csv").query("model == 'subset' and horizon_steps == 96")
+    y = pd.read_csv(subset / "forecasts.csv.gz")["y"]
+    assert clipped["MAE"].iloc[0] == pytest.approx(y.mean())
+    # The reference ran on all 13 origins; its forecasts are copies of past values (>= 0), so its clipped scores must
+    # equal its cells, which use only the 4 common origins.
+    ref_clipped = pd.read_csv(report / "clipped_visitors.csv").query("model == 'snaive'").set_index("horizon_steps")
+    ref_cells = cells.query("model == 'snaive'").set_index("horizon_steps")
+    assert np.allclose(ref_clipped["MAE"], ref_cells["MAE"])
+    assert json.loads((report / "report.json").read_text())["common_origins"] == 4
+    failures = pd.read_csv(report / "failures.csv").query("model == 'subset'")
+    assert (failures["valid_origins"] == 13).all() and (failures["evaluated_origins"] == 4).all()
+    assert (failures[["ok", "fallback", "failed"]].sum(axis=1) == failures["evaluated_origins"]).all()
+    assert "Common origins only" in (report / "summary.md").read_text()
+    full_report = make_report([full, subset], tmp_path / "reports", ("snaive", 1), tasks=tasks, report_id="all")
+    assert (pd.read_csv(full_report / "cells.csv").query("model == 'snaive'")["n_origins"] == 13).all()
