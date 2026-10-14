@@ -20,7 +20,9 @@ from benchmark.models.statsforecast_models import mstl_forecaster
 from benchmark.models.timesfm_models import timesfm25_forecaster
 from benchmark.models.tirex_models import tirex_forecaster
 from benchmark.models.toto_models import toto_forecaster
-from benchmark.models.trained_models import DEEPAR, DIRECT_TABULAR, RECURSIVE_TABULAR, TUNING_DAYS, autogluon_trainer
+from benchmark.models.trained_models import (
+    DEEPAR, DEEPAR_HOLDOUT, DIRECT_TABULAR, PATCHTST, RECURSIVE_TABULAR, TUNING_DAYS, autogluon_trainer,
+)
 from benchmark.tasks import SEASON
 
 WEEK = 7 * SEASON
@@ -91,12 +93,14 @@ ZERO_SHOT: dict[str, Baseline] = {
 # Trained models (Phase 3): one model per sensor, fitted on the data before the period and frozen. Their input window
 # (at most 863 steps: DeepAR's 192 unrolled steps plus its 672-step lag) fits the 14-day context, so they run on 14 and
 # 28 days. RecursiveTabular is a point forecaster (its intervals come from the context, not the model; decision D3-5).
-# DeepAR stops early on the final TUNING_DAYS before the cutoff.
+# DeepAR and PatchTST stop early on the final TUNING_DAYS before the cutoff.
 TRAINED: dict[str, Baseline] = {
     "ag_direct_tabular": Baseline(lambda: autogluon_trainer("DirectTabular", DIRECT_TABULAR), (14, 28)),
     "ag_recursive_tabular": Baseline(lambda: autogluon_trainer("RecursiveTabular", RECURSIVE_TABULAR,
                                                                point_only=True), (14, 28)),
-    "ag_deepar": Baseline(lambda: autogluon_trainer("DeepAR", DEEPAR, tuning_days=TUNING_DAYS), (14, 28)),
+    "ag_deepar": Baseline(lambda: autogluon_trainer("DeepAR", DEEPAR, tuning_days=TUNING_DAYS,
+                                                    holdout=DEEPAR_HOLDOUT), (14, 28)),
+    "ag_patchtst": Baseline(lambda: autogluon_trainer("PatchTST", PATCHTST, tuning_days=TUNING_DAYS), (14, 28)),
 }
 
 

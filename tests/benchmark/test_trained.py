@@ -6,7 +6,10 @@
 # features and the capped lags, early stopping gets the final days as tuning data, the same seed gives the same
 # forecasts, and the distribution the network computes from a context doesn't depend on the other contexts in the
 # batch (its sampled paths do, through torch's Student-t sampler, whose random draws depend on every element's degrees
-# of freedom); these use 2 short epochs (same network). Run only where AutoGluon is installed (the bench venv).
+# of freedom); these use 2 short epochs (same network). PatchTST: the same checks on its fitted network (one-week
+# context, no time features) and no training steps held out beyond the tuning days, since its validation loss scores
+# only the validated day. Both GluonTS models sample training windows only where a full input window of real data
+# exists. Run only where AutoGluon is installed (the bench venv).
 
 import numpy as np
 import pandas as pd
@@ -16,13 +19,14 @@ pytest.importorskip("autogluon.timeseries")
 
 from benchmark.models import TRAINED  # noqa: E402
 from benchmark.models.trained_models import (  # noqa: E402
-    DEEPAR, DIRECT_TABULAR, LAGS, TUNING_DAYS, autogluon_trainer, input_steps, tuning_split,
+    DEEPAR, DEEPAR_HOLDOUT, DIRECT_TABULAR, LAGS, PATCHTST, TUNING_DAYS, autogluon_trainer, input_steps, tuning_split,
 )
 from benchmark.tasks import BUCKETS_PER_DAY, HORIZON, QUANTILE_LEVELS  # noqa: E402
 
 TABULAR = ("ag_direct_tabular", "ag_recursive_tabular")
 MODEL_CLASSES = {"ag_direct_tabular": "DirectTabularModel", "ag_recursive_tabular": "RecursiveTabularModel"}
 SHORT_DEEPAR = {**DEEPAR, "max_epochs": 2, "num_batches_per_epoch": 5}  # same network, 2 short epochs
+SHORT_PATCHTST = {**PATCHTST, "max_epochs": 2, "num_batches_per_epoch": 5}
 BUILT: dict = {}
 
 
@@ -82,7 +86,7 @@ def test_trained_shape_finite_and_batch_independent(name):
 
 def test_only_recursive_tabular_is_a_point_forecaster():
     assert {name: TRAINED[name].build()[1]["point_only"] for name in TRAINED} == {
-        "ag_direct_tabular": False, "ag_recursive_tabular": True, "ag_deepar": False}
+        "ag_direct_tabular": False, "ag_recursive_tabular": True, "ag_deepar": False, "ag_patchtst": False}
 
 
 @pytest.mark.parametrize("name", TABULAR)
@@ -111,7 +115,7 @@ def test_a_model_autogluon_skips_raises_instead_of_forecasting_nothing():
 def test_every_trained_input_window_fits_the_shortest_context():
     for name, baseline in TRAINED.items():
         assert baseline.build()[1]["input_steps"] <= min(baseline.contexts) * BUCKETS_PER_DAY, name
-    assert input_steps(DEEPAR) == 2 * 96 + 672 - 1
+    assert input_steps(DEEPAR) == 2 * 96 + 672 - 1 and input_steps(PATCHTST) == 672
 
 
 def test_tuning_split_holds_out_the_final_days_one_window_each():
@@ -135,10 +139,46 @@ def test_registered_deepar_values_only_with_early_stopping_on_the_final_week():
     assert hyperparameters["time_features"] == [] and max(hyperparameters["lags_seq"]) == 672
     assert hyperparameters["disable_static_features"] and hyperparameters["disable_known_covariates"]
     assert params["tuning_days"] == TUNING_DAYS == 7 and params["point_only"] is False
+    assert params["holdout_steps"] == DEEPAR_HOLDOUT == 191 and params["train_min_past"] == 863
+
+
+def test_registered_patchtst_one_week_context_with_early_stopping_on_the_final_week():
+    _, params = TRAINED["ag_patchtst"].build()
+    hyperparameters = params["hyperparameters"]
+    assert hyperparameters["context_length"] == 672 and hyperparameters["patch_len"] == 16
+    assert hyperparameters["disable_static_features"] and hyperparameters["disable_known_covariates"]
+    assert params["tuning_days"] == TUNING_DAYS and params["holdout_steps"] == 0 and params["point_only"] is False
+    assert params["train_min_past"] == 672 and TRAINED["ag_direct_tabular"].build()[1]["train_min_past"] == 0
+
+
+# The distribution parameters the network's projection (`layer`, e.g. "param_proj") computes over each context in
+# one forecast call: the first call of the projection, on the context window. AutoGluon loads the model from disk for
+# each prediction, so the projection is wrapped at the class level.
+def _projected(monkeypatch, forecaster, network, layer: str, contexts: list[pd.Series]) -> list[np.ndarray]:
+    captured = []
+    projection = type(getattr(network, layer))
+    original = projection.forward
+    monkeypatch.setattr(projection, "forward", lambda self, x: captured.append(original(self, x)) or captured[-1])
+    forecaster(contexts, HORIZON, QUANTILE_LEVELS, 0)
+    monkeypatch.setattr(projection, "forward", original)
+    return [t.detach().clone().numpy() for t in captured[0]]
+
+
+# No path between series: a context's distribution parameters are the same whatever the other contexts are, and a
+# changed context changes its own. The sampled paths may still differ, because torch's Student-t sampler consumes
+# random numbers depending on every element's degrees of freedom.
+def _assert_batch_independent(monkeypatch, forecaster, network, layer: str, contexts: list[pd.Series]) -> None:
+    alone = _projected(monkeypatch, forecaster, network, layer, contexts)
+    mixed = _projected(monkeypatch, forecaster, network, layer,
+                       [contexts[0] + 100.0, contexts[1], contexts[2] - 50.0])
+    assert alone[0].shape[0] == 3
+    for a, b in zip(alone, mixed):
+        np.testing.assert_allclose(a[1], b[1], rtol=1e-6, atol=1e-6)
+        assert not np.allclose(a[0], b[0])
 
 
 def test_deepar_network_early_stopping_seed_and_sampling(monkeypatch):
-    trainer, _ = autogluon_trainer("DeepAR", SHORT_DEEPAR, tuning_days=TUNING_DAYS)
+    trainer, _ = autogluon_trainer("DeepAR", SHORT_DEEPAR, tuning_days=TUNING_DAYS, holdout=DEEPAR_HOLDOUT)
     items, contexts = _data(days=20)  # 13 days of training after the 7 tuning days
     forecaster, info = trainer("S", items, 0)
 
@@ -146,6 +186,7 @@ def test_deepar_network_early_stopping_seed_and_sampling(monkeypatch):
     network = model.gts_predictor.prediction_net.model
     assert network.context_length == 192 and max(network.lags_seq) == 671  # GluonTS stores lag - 1
     assert network._past_length == input_steps(DEEPAR)
+    assert model._get_estimator().train_sampler.min_past == input_steps(DEEPAR)  # no zero-padded training windows
     assert network.num_feat_dynamic_real == 1  # only the built-in age feature: no time features
     # Early stopping ran on the tuning data: a validation loss was logged every epoch, and the fit record has it.
     assert info["tuning_days"] == 7 and info["holdout_steps"] == 191
@@ -157,20 +198,25 @@ def test_deepar_network_early_stopping_seed_and_sampling(monkeypatch):
     assert batch.shape == (3, HORIZON, len(QUANTILE_LEVELS)) and status == ["ok"] * 3 and np.isfinite(batch).all()
     np.testing.assert_array_equal(batch, forecaster(contexts, HORIZON, QUANTILE_LEVELS, 0)[0])
 
-    # No path between series: the distribution parameters the network computes over a context (its first projection
-    # call, on the context window) are the same whatever the other contexts are. The sampled paths may still differ,
-    # because torch's Student-t sampler consumes random numbers depending on every element's degrees of freedom.
-    # AutoGluon loads the model from disk for each prediction, so the projection is wrapped at the class level.
-    captured = []
-    projection = type(network.param_proj)
-    original = projection.forward
-    monkeypatch.setattr(projection, "forward", lambda self, x: captured.append(original(self, x)) or captured[-1])
-    forecaster(contexts, HORIZON, QUANTILE_LEVELS, 0)
-    alone = [t.detach().clone() for t in captured[0]]
-    captured.clear()
-    forecaster([contexts[0] + 100.0, contexts[1], contexts[2] - 50.0], HORIZON, QUANTILE_LEVELS, 0)
-    mixed = [t.detach().clone() for t in captured[0]]
-    assert alone[0].shape[0] == 3 and alone[0].shape[1] >= 192  # batch × context window
-    for a, b in zip(alone, mixed):
-        np.testing.assert_allclose(a[1].numpy(), b[1].numpy(), rtol=1e-6, atol=1e-6)
-        assert not np.allclose(a[0].numpy(), b[0].numpy())  # the changed neighbour does change its own row
+    assert _projected(monkeypatch, forecaster, network, "param_proj", contexts)[0].shape[1] >= 192  # context window
+    _assert_batch_independent(monkeypatch, forecaster, network, "param_proj", contexts)
+
+
+def test_patchtst_network_early_stopping_seed_and_batch_independence(monkeypatch):
+    trainer, _ = autogluon_trainer("PatchTST", SHORT_PATCHTST, tuning_days=TUNING_DAYS)
+    items, contexts = _data(days=20)
+    forecaster, info = trainer("S", items, 0)
+
+    model = forecaster.predictor._learner.load_trainer().load_model(forecaster.predictor.model_names()[0])
+    network = model.gts_predictor.prediction_net.model
+    assert network.context_length == 672 and network.patch_len == 16 and network.stride == 8
+    assert network.num_feat_dynamic_real == 0  # no time features, no covariates
+    assert model._get_estimator().train_sampler.min_past == 672  # no zero-padded training windows
+    assert info["tuning_days"] == 7 and info["holdout_steps"] == 0 and info["training_rows"] == 13 * 96
+    assert 1 <= info["best_epoch"] <= info["epochs_run"] <= SHORT_PATCHTST["max_epochs"]
+    assert np.isfinite(info["best_val_loss"])
+
+    batch, status = forecaster(contexts, HORIZON, QUANTILE_LEVELS, 0)
+    assert batch.shape == (3, HORIZON, len(QUANTILE_LEVELS)) and status == ["ok"] * 3 and np.isfinite(batch).all()
+    np.testing.assert_array_equal(batch, forecaster(contexts, HORIZON, QUANTILE_LEVELS, 0)[0])
+    _assert_batch_independent(monkeypatch, forecaster, network, "args_proj", contexts)
