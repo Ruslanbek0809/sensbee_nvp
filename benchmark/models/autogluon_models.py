@@ -11,6 +11,7 @@
 import logging
 import tempfile
 from pathlib import Path
+from typing import Optional
 
 import numpy as np
 import pandas as pd
@@ -28,11 +29,15 @@ def physical_cores() -> int:
     return joblib.cpu_count(only_physical_cores=True)
 
 
-# One TimeSeriesDataFrame with one item per context; item ids ("<prefix>000000", ...) keep the batch order.
-def _batch_frame(contexts: list[pd.Series], prefix: str = ""):
+# One TimeSeriesDataFrame with one item per context; item ids ("<prefix>000000", ...) keep the batch order. covariates:
+# one frame per context whose rows at the context's timestamps become extra columns (known covariates).
+def _batch_frame(contexts: list[pd.Series], prefix: str = "", covariates: Optional[list[pd.DataFrame]] = None):
     from autogluon.timeseries import TimeSeriesDataFrame
     frames = [pd.DataFrame({"item_id": f"{prefix}{i:06d}", "timestamp": c.index, "target": c.to_numpy(dtype=float)})
               for i, c in enumerate(contexts)]
+    if covariates is not None:
+        frames = [f.assign(**{col: w[col].reindex(c.index).to_numpy(dtype=float) for col in w.columns})
+                  for f, c, w in zip(frames, contexts, covariates)]
     return TimeSeriesDataFrame.from_data_frame(pd.concat(frames, ignore_index=True))
 
 

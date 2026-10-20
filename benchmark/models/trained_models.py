@@ -25,6 +25,18 @@
 # window end anywhere after an item's first step and fills the missing past with zeros, which the network can't tell
 # from real zeros (a closed hall, 0 °C) and which no harness context contains (3-9% of the windows on our training
 # items), so training windows start only once an item holds a full input window (min_past = input_steps).
+# Known covariates (Phase 4, tabular models only; benchmark/covariates.py): the trainer gets the known columns before
+# the cutoff, which become extra columns of the training items and AutoGluon's known_covariates_names; each forecast
+# gets its window's context rows as columns and its HORIZON future rows as known_covariates. covariate_scaler and
+# covariate_regressor are None (AutoGluon's tabular default, written out). AutoGluon 1.6.3 also adds, for every known
+# covariate that isn't 0/1, a copy divided by its mean |value| per item (mlforecast.py:293-303, no switch): over the
+# whole training item when fitting; when forecasting, over the context plus the 96 future rows (DirectTabular,
+# mlforecast.py:572) or the 96 future rows alone (RecursiveTabular, :729). So that copy is on another scale in fit and
+# forecast (known values only, no leakage). On the real validation fits the trees hardly use it: 0 % of the LightGBM
+# gain on the halls (one training item, so the copy is collinear with its column), 0.9 % (DirectTabular) and 0.02 %
+# (RecursiveTabular) on Manebach (benchmark_data/spikes/*_phase4_4.2_gates/scaled_copy_importance_output.txt).
+# The opening profile on training rows is fitted on the training span that holds those rows (in-sample), while a
+# forecast's profile only knows the past: a limitation (owner, 2026-10-15).
 # The tabular target scaler is fitted per series on whatever it is given: the whole training item when fitting, the
 # 14- or 28-day context when forecasting. Training items get ids ("train000000", ...) that no context id ("000000",
 # ...) can match, so every context is a series unseen in fit. RecursiveTabular's quantiles are then Gaussian around its
@@ -34,6 +46,7 @@
 import logging
 import tempfile
 from pathlib import Path
+from typing import Optional
 
 import numpy as np
 import pandas as pd
@@ -50,6 +63,7 @@ LIGHTGBM = {"num_boost_round": 10000, "learning_rate": 0.05, "ag.early_stop": "a
 TABULAR_COMMON = {"lags": list(LAGS), "date_features": [], "model_name": "GBM", "max_num_items": None,
                   "max_num_samples": None}
 EVAL_METRIC = "SQL"
+COVARIATE_DEFAULTS = {"covariate_scaler": None, "covariate_regressor": None}  # AutoGluon's tabular defaults
 TUNING_DAYS = 7
 # AutoGluon's training defaults for GluonTS models, written out, plus no covariates and the kept Lightning logs.
 GLUONTS_COMMON = {"disable_static_features": True, "disable_known_covariates": True, "max_epochs": 100,
@@ -108,15 +122,19 @@ def autogluon_trainer(model: str, params: dict, point_only: bool = False, tuning
     steps = input_steps(params)
     min_past = steps if "context_length" in params else 0
 
-    def train(sensor: str, items: list[pd.Series], seed: int):
-        from autogluon.timeseries import TimeSeriesPredictor
+    def train(sensor: str, items: list[pd.Series], seed: int, covariates: Optional[pd.DataFrame] = None):
+        from autogluon.timeseries import TimeSeriesDataFrame, TimeSeriesPredictor
         if not items:
             raise ValueError(f"NO TRAINING ITEMS FOR {sensor}")
+        names = [] if covariates is None else list(covariates.columns)
         workdir = tempfile.TemporaryDirectory(prefix="trained_")  # kept alive by the forecaster below
         predictor = TimeSeriesPredictor(prediction_length=HORIZON, freq=BUCKET_FREQ,
                                         quantile_levels=list(QUANTILE_LEVELS), eval_metric=EVAL_METRIC,
+                                        known_covariates_names=names or None,
                                         path=str(Path(workdir.name) / "predictor"), verbosity=0, log_to_file=False)
         fitted = dict(hyperparameters)
+        if names:
+            fitted.update(COVARIATE_DEFAULTS)
         if "model_hyperparameters" in fitted:
             fitted["model_hyperparameters"] = {**fitted["model_hyperparameters"], "seed": seed}
         if min_past:
@@ -126,21 +144,37 @@ def autogluon_trainer(model: str, params: dict, point_only: bool = False, tuning
         tuning, info = None, {}
         if tuning_days:
             items, tune = tuning_split(items, tuning_days, steps, holdout)
-            tuning = _batch_frame(tune, prefix="tune")
+            tuning = _batch_frame(tune, prefix="tune",
+                                  covariates=None if covariates is None else [covariates] * len(tune))
             info = {"tuning_days": tuning_days, "holdout_steps": holdout, "tuning_end": str(tune[0].index[-1])}
         info = {"training_rows": int(sum(len(i) for i in items)), **info}
-        predictor.fit(_batch_frame(items, prefix="train"), tuning_data=tuning, hyperparameters={model: fitted},
+        if names:
+            info.update({"known_covariates": names, **COVARIATE_DEFAULTS})
+        train_covariates = None if covariates is None else [covariates] * len(items)
+        predictor.fit(_batch_frame(items, prefix="train", covariates=train_covariates), tuning_data=tuning,
+                      hyperparameters={model: fitted},
                       enable_ensemble=False, skip_model_selection=True, random_seed=seed)
         if not predictor.model_names():  # AutoGluon logs a failed fit and skips the model instead of raising
             raise RuntimeError(f"AUTOGLUON TRAINED NO {model} MODEL FOR {sensor}")
         if params.get("keep_lightning_logs"):
             info.update(_lightning_epochs(Path(workdir.name)))
 
-        def forecast(contexts: list[pd.Series], horizon: int, levels: tuple[float, ...],
-                     seed: int) -> tuple[np.ndarray, list[str]]:
+        def forecast(contexts: list[pd.Series], horizon: int, levels: tuple[float, ...], seed: int,
+                     covariates: Optional[list[pd.DataFrame]] = None) -> tuple[np.ndarray, list[str]]:
             if horizon != HORIZON or tuple(levels) != QUANTILE_LEVELS:
                 raise ValueError(f"TRAINED FOR HORIZON {HORIZON} AND {QUANTILE_LEVELS}")
-            predictions = predictor.predict(_batch_frame(contexts), random_seed=seed)
+            if (covariates is None) != (not names):
+                raise ValueError(f"TRAINED WITH KNOWN COVARIATES {names}: EVERY FORECAST NEEDS THEM, AND ONLY THEM")
+            if covariates is None:
+                predictions = predictor.predict(_batch_frame(contexts), random_seed=seed)
+            else:
+                windows = [w[names] for w in covariates]
+                future = [pd.DataFrame({"item_id": f"{i:06d}", "timestamp": w.index[len(c):],
+                                        **{col: w[col].iloc[len(c):].to_numpy(dtype=float) for col in names}})
+                          for i, (c, w) in enumerate(zip(contexts, windows))]
+                predictions = predictor.predict(
+                    _batch_frame(contexts, covariates=windows), random_seed=seed,
+                    known_covariates=TimeSeriesDataFrame.from_data_frame(pd.concat(future, ignore_index=True)))
             return _quantiles(predictions, len(contexts), QUANTILE_LEVELS, point_only), ["ok"] * len(contexts)
 
         forecast.workdir, forecast.predictor = workdir, predictor  # the folder lives as long as the forecaster

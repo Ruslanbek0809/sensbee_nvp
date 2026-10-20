@@ -101,9 +101,11 @@ ZERO_SHOT: dict[str, Baseline] = {
 # 28 days. RecursiveTabular is a point forecaster (its intervals come from the context, not the model; decision D3-5).
 # DeepAR and PatchTST stop early on the final TUNING_DAYS before the cutoff.
 TRAINED: dict[str, Baseline] = {
-    "ag_direct_tabular": Baseline(lambda: autogluon_trainer("DirectTabular", DIRECT_TABULAR), (14, 28), trained=True),
+    "ag_direct_tabular": Baseline(lambda: autogluon_trainer("DirectTabular", DIRECT_TABULAR), (14, 28), trained=True,
+                                  covariate_kinds=("known",)),
     "ag_recursive_tabular": Baseline(lambda: autogluon_trainer("RecursiveTabular", RECURSIVE_TABULAR,
-                                                               point_only=True), (14, 28), trained=True),
+                                                               point_only=True), (14, 28), trained=True,
+                                     covariate_kinds=("known",)),
     "ag_deepar": Baseline(lambda: autogluon_trainer("DeepAR", DEEPAR, tuning_days=TUNING_DAYS,
                                                     holdout=DEEPAR_HOLDOUT), (14, 28), trained=True),
     "ag_patchtst": Baseline(lambda: autogluon_trainer("PatchTST", PATCHTST, tuning_days=TUNING_DAYS), (14, 28),

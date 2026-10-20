@@ -9,7 +9,9 @@
 # of freedom); these use 2 short epochs (same network). PatchTST: the same checks on its fitted network (one-week
 # context, no time features) and no training steps held out beyond the tuning days, since its validation loss scores
 # only the validated day. Both GluonTS models sample training windows only where a full input window of real data
-# exists. Run only where AutoGluon is installed (the bench venv).
+# exists. Known covariates (Phase 4, tabular models): a known column that drives the target reaches the fitted model,
+# changes the forecast when its future changes, keeps batch independence, and a forecaster trained with covariates
+# refuses a forecast without them. Run only where AutoGluon is installed (the bench venv).
 
 import numpy as np
 import pandas as pd
@@ -17,6 +19,7 @@ import pytest
 
 pytest.importorskip("autogluon.timeseries")
 
+from benchmark import covariates as cov  # noqa: E402
 from benchmark.models import TRAINED  # noqa: E402
 from benchmark.models.trained_models import (  # noqa: E402
     DEEPAR, DEEPAR_HOLDOUT, DIRECT_TABULAR, LAGS, PATCHTST, TUNING_DAYS, autogluon_trainer, input_steps, tuning_split,
@@ -224,3 +227,46 @@ def test_patchtst_network_early_stopping_seed_and_batch_independence(monkeypatch
     assert batch.shape == (3, HORIZON, len(QUANTILE_LEVELS)) and status == ["ok"] * 3 and np.isfinite(batch).all()
     np.testing.assert_array_equal(batch, forecaster(contexts, HORIZON, QUANTILE_LEVELS, 0)[0])
     _assert_batch_independent(monkeypatch, forecaster, network, "args_proj", contexts)
+
+
+# _data() plus a known on/off column "k" (random 2-h blocks) that adds 8 to the target, the trainer's frame of it
+# before the cutoff, and each context's covariate window as the runner builds it.
+def _covariate_data() -> tuple[list[pd.Series], list[pd.Series], pd.DataFrame, list[pd.DataFrame]]:
+    items, contexts = _data()
+    index = pd.date_range("2026-01-01", periods=18 * BUCKETS_PER_DAY, freq="15min")
+    k = np.repeat(np.random.default_rng(1).integers(0, 2, len(index) // 8), 8).astype(float)
+    frame = pd.DataFrame({"k": k}, index=index)
+    shift = pd.Series(8 * k, index=index)
+    items = [item + shift.reindex(item.index) for item in items]
+    contexts = [c + shift.reindex(c.index) for c in contexts]
+    kinds = {"k": "known"}
+    windows = [cov.covariate_window(frame, kinds, c.index[-1] + pd.Timedelta("15min"), c.index) for c in contexts]
+    return items, contexts, cov.training_covariates(frame, kinds, items[0].index[-1] + pd.Timedelta("15min")), windows
+
+
+@pytest.mark.parametrize("name", TABULAR)
+def test_known_covariates_reach_the_tabular_model_and_its_forecast(name):
+    trainer, _ = TRAINED[name].build()
+    items, contexts, frame, windows = _covariate_data()
+    forecaster, info = trainer("S", items, 0, covariates=frame)
+
+    model = _fitted_model(forecaster)
+    assert model.covariate_metadata.known_covariates == ["k"]
+    assert info["known_covariates"] == ["k"] and info["covariate_scaler"] is None
+    batch, status = forecaster(contexts, HORIZON, QUANTILE_LEVELS, 0, covariates=windows)
+    alone, _ = forecaster([contexts[1]], HORIZON, QUANTILE_LEVELS, 0, covariates=[windows[1]])
+    assert status == ["ok"] * 3 and np.isfinite(batch).all()
+    np.testing.assert_allclose(alone[0], batch[1], rtol=1e-9, atol=1e-9)
+    flipped = []
+    for c, w in zip(contexts, windows):
+        f = w.copy()
+        f.iloc[len(c):, 0] = 1 - f.iloc[len(c):, 0]
+        flipped.append(f)
+    other, _ = forecaster(contexts, HORIZON, QUANTILE_LEVELS, 0, covariates=flipped)
+    # where k flips from 0 to 1 the forecast should rise by about 8 (the model learned the effect)
+    up = np.array([w["k"].iloc[len(c):].to_numpy() == 0 for c, w in zip(contexts, windows)])
+    rise = (other[..., 4] - batch[..., 4])[up]
+    print(f"{name}: MEAN RISE WHERE k FLIPS 0 -> 1 = {rise.mean():.2f}")
+    assert rise.mean() > 4
+    with pytest.raises(ValueError, match="EVERY FORECAST NEEDS THEM"):
+        forecaster(contexts, HORIZON, QUANTILE_LEVELS, 0)
