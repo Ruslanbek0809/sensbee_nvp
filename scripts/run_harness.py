@@ -10,7 +10,8 @@
 # some of them; --origin-stride k evaluates every k-th valid origin. No network; reads only the snapshot (set
 # HF_HUB_OFFLINE=1 so model weights come only from the local cache). --covariates <set> (benchmark/covariates.py) runs
 # a model that accepts the set's covariate kinds on sensors of the set's kind; the run's model name becomes
-# "<model>+<set>".
+# "<model>+<set>". A "0 when closed" model (MASKED) needs --mask-threshold and a set with the opening profile
+# (cal_open); its run is named "<model>_t<threshold>+<set>".
 #
 # Usage (from sensbee_nvp/):
 #   venv/bin/python scripts/run_harness.py --snapshot ../../benchmark_data/snapshots/sensbee-2026-10-01 --dry-run
@@ -40,7 +41,7 @@ sys.path.insert(0, str(PROJECT_ROOT))
 
 from benchmark.covariates import COVARIATE_SETS  # noqa: E402
 from benchmark.metrics import METRICS  # noqa: E402
-from benchmark.models import BASELINES, LLMTIME, TRAINED, ZERO_SHOT, library_versions  # noqa: E402
+from benchmark.models import BASELINES, LLMTIME, MASKED, TRAINED, ZERO_SHOT, library_versions  # noqa: E402
 from benchmark.runner import CHECK_FORECASTERS, run  # noqa: E402
 from benchmark.snapshot import load_snapshot  # noqa: E402
 from benchmark.tasks import CONTEXT_DAYS, TASKS, origin_table, target_series, validity_context_days  # noqa: E402
@@ -90,7 +91,7 @@ def main() -> None:
     parser = argparse.ArgumentParser(description="Benchmark harness on a frozen snapshot (no network)")
     parser.add_argument("--snapshot", type=Path, required=True, help="snapshot folder (with manifest.json)")
     parser.add_argument("--out", type=Path, help="parent folder; a new <run id> folder is created (not for --dry-run)")
-    parser.add_argument("--model", choices=[*CHECK_FORECASTERS, *BASELINES, *ZERO_SHOT, *TRAINED, *LLMTIME],
+    parser.add_argument("--model", choices=[*CHECK_FORECASTERS, *BASELINES, *ZERO_SHOT, *TRAINED, *LLMTIME, *MASKED],
                         help="check forecaster, baseline, zero-shot, trained or LLMTime model")
     parser.add_argument("--dry-run", action="store_true", help="list the origins per sensor and write nothing")
     parser.add_argument("--sensors", nargs="+", choices=list(TASKS), default=list(TASKS))
@@ -102,6 +103,8 @@ def main() -> None:
     parser.add_argument("--origin-stride", type=int, default=1, help="evaluate every k-th valid origin (default 1)")
     parser.add_argument("--covariates", choices=list(COVARIATE_SETS),
                         help="covariate set (only for models that accept its kinds, on sensors of its kind)")
+    parser.add_argument("--mask-threshold", type=float,
+                        help="'0 when closed' models: forecast 0 where the opening profile is below this share")
     args = parser.parse_args()
     requested = None if args.contexts is None else tuple(None if c == "all" else int(c) for c in args.contexts)
 
@@ -111,8 +114,14 @@ def main() -> None:
     if args.out is None or args.model is None:
         parser.error("--out and --model are required unless --dry-run")
     model_info, forecaster, trainer = {}, None, None
-    models = {**BASELINES, **ZERO_SHOT, **TRAINED, **LLMTIME}
+    models = {**BASELINES, **ZERO_SHOT, **TRAINED, **LLMTIME, **MASKED}
     name = args.model
+    if (args.model in MASKED) != (args.mask_threshold is not None):
+        parser.error("--mask-threshold goes with a MASKED model, and every MASKED model needs it")
+    if args.model in MASKED:
+        if args.covariates is None or "open" not in COVARIATE_SETS[args.covariates].groups:
+            parser.error(f"{args.model} needs a covariate set with the opening profile (cal_open)")
+        name = f"{args.model}_t{args.mask_threshold:g}"
     if args.covariates is not None:
         spec = COVARIATE_SETS[args.covariates]
         accepted = models[args.model].covariate_kinds if args.model in models else ()
@@ -122,13 +131,13 @@ def main() -> None:
         wrong = [sensor for sensor in args.sensors if TASKS[sensor].kind != spec.kind]
         if wrong:
             parser.error(f"the set {args.covariates} is for {spec.kind} sensors; pick --sensors without {wrong}")
-        name = f"{args.model}+{args.covariates}"
+        name = f"{name}+{args.covariates}"
     if args.model in models:
         baseline = models[args.model]
         contexts = baseline.contexts if requested is None else requested
         if not set(contexts) <= set(baseline.contexts):
             parser.error(f"{args.model} runs only on contexts {list(baseline.contexts)} (days)")
-        built, params = baseline.build()
+        built, params = baseline.build(args.mask_threshold) if args.model in MASKED else baseline.build()
         if baseline.trained:
             trainer = built
         else:

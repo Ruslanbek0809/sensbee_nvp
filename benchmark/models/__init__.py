@@ -16,6 +16,7 @@ from typing import Callable, Optional
 from benchmark.models.autogluon_models import autogluon_forecaster
 from benchmark.models.chronos_models import chronos2_forecaster, chronos_bolt_forecaster
 from benchmark.models.llmtime_models import llmtime_forecaster
+from benchmark.models.mask_models import mask_forecaster
 from benchmark.models.moirai_models import moirai2_forecaster
 from benchmark.models.statsforecast_models import mstl_forecaster
 from benchmark.models.timesfm_models import timesfm25_forecaster
@@ -118,6 +119,18 @@ TRAINED: dict[str, Baseline] = {
 # use a fixed origin subset, --origin-stride). Kept apart from ZERO_SHOT so its integration tests don't load 14.5 GB.
 LLMTIME: dict[str, Baseline] = {
     "llmtime_mistral7b": _zero_shot(llmtime_forecaster, MISTRAL_7B, (14,), "model-00001-of-00002.safetensors"),
+}
+
+
+# "0 when closed" baselines (Phase 4, RQ2): a values-only base with every quantile set to 0 where the learned opening
+# profile is below a threshold. build(threshold) → (forecaster, parameters); they run only with a covariate set that
+# has "open_share" (cal_open), on the halls, at the base's contexts (Chronos-2 at 28 days only, the headline context).
+MASKED: dict[str, Baseline] = {
+    "mask0_snaive672": Baseline(lambda threshold: mask_forecaster(BASELINES["ag_snaive672"].build, threshold,
+                                                                  "ag_snaive672"),
+                                (14, 28), covariate_kinds=("known",)),
+    "mask0_chronos2": Baseline(lambda threshold: mask_forecaster(ZERO_SHOT["chronos2"].build, threshold, "chronos2"),
+                               (28,), ZERO_SHOT["chronos2"].weights, covariate_kinds=("known",)),
 }
 
 

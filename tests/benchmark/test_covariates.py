@@ -3,7 +3,8 @@
 # solstice geometry, the opening profile fitted only before the cutoff, the leakage guard of covariate_window (raising
 # every raw value at or after the origin changes nothing a non-oracle forecast sees), and that the runner hands each
 # forecast its own window, through the split by length and the one-by-one retry, and a trainer only known columns
-# before the cutoff.
+# before the cutoff; and the "0 when closed" mask (Phase 4 step 4.3): zero exactly where the learned profile is
+# below the threshold, the base forecast untouched elsewhere.
 
 import json
 from datetime import date, timedelta
@@ -14,6 +15,7 @@ import pandas as pd
 import pytest
 
 from benchmark import covariates as cov
+from benchmark.models.mask_models import mask_forecaster
 from benchmark.runner import _predict, naive_forecaster, run
 from benchmark.snapshot import MANIFEST_NAME, write_raw_csv
 from benchmark.tasks import HORIZON, QUANTILE_LEVELS, TASKS, SensorTask, target_series
@@ -263,3 +265,28 @@ def test_a_trainer_gets_only_known_columns_before_the_cutoff(tmp_path):
     (frame,) = received
     assert list(frame.columns) == list(cov.SUN)
     assert frame.index[-1] == pd.Timestamp("2026-02-01") - pd.Timedelta("15min")
+
+
+def test_the_mask_zeroes_exactly_the_closed_slots_and_keeps_the_rest():
+    context = pd.Series(np.arange(4, dtype=float) + 1, index=pd.date_range("2026-01-05", periods=4, freq="15min"))
+    share = np.where(np.arange(HORIZON) % 2 == 0, 0.05, 0.5)
+    window = pd.DataFrame({"open_share": np.r_[np.ones(4), share]},
+                          index=context.index.append(pd.date_range("2026-01-05 01:00", periods=HORIZON, freq="15min")))
+    forecast, params = mask_forecaster(lambda: (naive_forecaster, {"point_only": True}), 0.1, "naive")
+    quantiles, status = forecast([context], HORIZON, QUANTILE_LEVELS, 0, covariates=[window])
+    assert status == ["ok"] and params["threshold"] == 0.1 and params["point_only"] is True
+    assert params["base_model"] == "naive"
+    assert (quantiles[0, share < 0.1] == 0).all() and (quantiles[0, share >= 0.1] == 4.0).all()
+
+
+def test_a_masked_run_forecasts_zero_outside_the_learned_opening_hours(tmp_path):
+    snapshot_dir, tasks = _visitor_snapshot(tmp_path)
+    forecast, params = mask_forecaster(lambda: (lambda c, h, l, s: (np.full((len(c), h, len(l)), 7.0), ["ok"] * len(c)),
+                                                {"point_only": False}), 0.5, "base")
+    run_dir = run(forecast, "mask+cal_open", snapshot_dir, tmp_path / "runs", tasks=tasks, context_days=(1,),
+                  covariates="cal_open", model_params=params)
+    forecasts = pd.read_csv(run_dir / "forecasts.csv.gz", parse_dates=["timestamp"])
+    local = cov.berlin(pd.DatetimeIndex(forecasts["timestamp"]))
+    open_slot = (local.weekday == 0) & (local.hour == 9)  # the only slots with visitors before the cutoff
+    assert open_slot.any() and (forecasts.loc[open_slot, "q0.5"] == 7.0).all()
+    assert (forecasts.loc[~open_slot, [f"q{q:g}" for q in QUANTILE_LEVELS]] == 0).all().all()
