@@ -46,7 +46,8 @@ PACKAGES = ("autogluon.timeseries", "statsforecast", "statsmodels", "scipy", "to
 # One baseline: build() → (forecaster, parameters), or (trainer, parameters) when trained; contexts: the allowed
 # context lengths in days; weights: for a zero-shot model, (model id, revision, weight file name) in the Hugging Face
 # cache; trained: build() returns a trainer, fitted per sensor by the runner; covariate_kinds: the covariate kinds
-# (benchmark/covariates.py) its forecaster or trainer accepts, none by default.
+# (benchmark/covariates.py) its forecaster or trainer accepts, none by default; covariate_groups: the feature groups a
+# covariate set must contain for it (the "0 when closed" models need the opening profile).
 @dataclass(frozen=True)
 class Baseline:
     build: Callable
@@ -54,6 +55,7 @@ class Baseline:
     weights: Optional[tuple[str, str, str]] = None
     trained: bool = False
     covariate_kinds: tuple[str, ...] = ()
+    covariate_groups: tuple[str, ...] = ()
 
 
 # AutoGluon SeasonalNaive uses its seasonal branch only when the context has more than m + 1 steps, otherwise it
@@ -128,9 +130,10 @@ LLMTIME: dict[str, Baseline] = {
 MASKED: dict[str, Baseline] = {
     "mask0_snaive672": Baseline(lambda threshold: mask_forecaster(BASELINES["ag_snaive672"].build, threshold,
                                                                   "ag_snaive672"),
-                                (14, 28), covariate_kinds=("known",)),
+                                (14, 28), covariate_kinds=("known",), covariate_groups=("open",)),
     "mask0_chronos2": Baseline(lambda threshold: mask_forecaster(ZERO_SHOT["chronos2"].build, threshold, "chronos2"),
-                               (28,), ZERO_SHOT["chronos2"].weights, covariate_kinds=("known",)),
+                               (28,), ZERO_SHOT["chronos2"].weights, covariate_kinds=("known",),
+                               covariate_groups=("open",)),
 }
 
 

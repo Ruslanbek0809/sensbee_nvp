@@ -167,7 +167,7 @@ def context_window(series: pd.Series, origin: pd.Timestamp, steps: Optional[int]
 
 
 # The HORIZON target values from the origin on, NaN where the series has none.
-def target_window(series: pd.Series, origin: pd.Timestamp) -> pd.Series:
+def target_window(series: pd.Series | pd.DataFrame, origin: pd.Timestamp) -> pd.Series | pd.DataFrame:
     return series.reindex(pd.date_range(origin, periods=HORIZON, freq=BUCKET_FREQ))
 
 
@@ -195,14 +195,18 @@ def training_series(series: pd.Series, cutoff: pd.Timestamp) -> pd.Series:
     return series.loc[: pd.Timestamp(cutoff) - STEP]
 
 
-# Training items for a fitted model: the series from task.train_start to strictly before the cutoff (training_series),
+# The series a fitted model learns from: from task.train_start (when set) to strictly before the cutoff.
+def training_history(series: pd.Series, task: SensorTask, cutoff: pd.Timestamp) -> pd.Series:
+    history = training_series(series, cutoff)
+    return history if task.train_start is None else history.loc[pd.Timestamp(task.train_start):]
+
+
+# Training items for a fitted model: the series from task.train_start to strictly before the cutoff (training_history),
 # cut into gap-free pieces. Exclusions and gaps longer than TRAIN_GAP_BUCKETS split the series; shorter gaps are
 # forward-filled (the context rule), and pieces shorter than MIN_TRAIN_DAYS are dropped, so a model never learns long
 # flat filled stretches or an outage. Every piece lies on the complete 15-min grid.
 def training_items(series: pd.Series, task: SensorTask, cutoff: pd.Timestamp) -> list[pd.Series]:
-    history = training_series(series, cutoff)
-    if task.train_start is not None:
-        history = history.loc[pd.Timestamp(task.train_start):]
+    history = training_history(series, task, cutoff)
     missing = history.isna()
     run_length = missing.groupby((missing != missing.shift()).cumsum()).transform("size")
     split = (missing & (run_length > TRAIN_GAP_BUCKETS)) | _excluded(history.index, task)

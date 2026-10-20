@@ -212,8 +212,8 @@ def run(forecaster: Optional[Forecaster], model: str, snapshot_dir: Path, out_ro
     if origin_stride < 1:
         raise ValueError(f"ORIGIN STRIDE {origin_stride} MUST BE AT LEAST 1")
     tasks = TASKS if tasks is None else tasks
-    if covariates is not None:
-        spec = cov.COVARIATE_SETS[covariates]
+    spec = None if covariates is None else cov.COVARIATE_SETS[covariates]
+    if spec is not None:
         wrong = sorted(sensor for sensor, task in tasks.items() if task.kind != spec.kind)
         if wrong:
             raise ValueError(f"COVARIATE SET {covariates} IS FOR {spec.kind} SENSORS, NOT {wrong}")
@@ -298,9 +298,8 @@ def run(forecaster: Optional[Forecaster], model: str, snapshot_dir: Path, out_ro
         "validity_context_days": list(validity_context_days(context_days)),
         "origin_stride": origin_stride,
         "trained": trainer is not None,
-        "covariates": None if covariates is None else {
-            "set": covariates, "kind": cov.COVARIATE_SETS[covariates].kind,
-            "groups": list(cov.COVARIATE_SETS[covariates].groups), "oracle": cov.COVARIATE_SETS[covariates].oracle},
+        "covariates": None if spec is None else {
+            "set": covariates, "kind": spec.kind, "groups": list(spec.groups), "oracle": spec.oracle},
         "settings": {
             "horizon": HORIZON, "report_steps": list(REPORT_STEPS), "quantile_levels": list(levels),
             "origin_freq": ORIGIN_FREQ, "guard_hours": GUARD / pd.Timedelta("1h"),

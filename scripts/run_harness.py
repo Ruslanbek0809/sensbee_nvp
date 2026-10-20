@@ -119,18 +119,17 @@ def main() -> None:
     if (args.model in MASKED) != (args.mask_threshold is not None):
         parser.error("--mask-threshold goes with a MASKED model, and every MASKED model needs it")
     if args.model in MASKED:
-        if args.covariates is None or "open" not in COVARIATE_SETS[args.covariates].groups:
-            parser.error(f"{args.model} needs a covariate set with the opening profile (cal_open)")
         name = f"{args.model}_t{args.mask_threshold:g}"
+    needed = models[args.model].covariate_groups if args.model in models else ()
+    groups = () if args.covariates is None else COVARIATE_SETS[args.covariates].groups
+    if not set(needed) <= set(groups):
+        parser.error(f"{args.model} needs a covariate set with the groups {list(needed)}")
     if args.covariates is not None:
         spec = COVARIATE_SETS[args.covariates]
         accepted = models[args.model].covariate_kinds if args.model in models else ()
         if not set(spec.column_kinds) <= set(accepted):
             parser.error(f"{args.model} accepts covariate kinds {list(accepted)}, the set {args.covariates} needs "
                          f"{list(spec.column_kinds)}")
-        wrong = [sensor for sensor in args.sensors if TASKS[sensor].kind != spec.kind]
-        if wrong:
-            parser.error(f"the set {args.covariates} is for {spec.kind} sensors; pick --sensors without {wrong}")
         name = f"{name}+{args.covariates}"
     if args.model in models:
         baseline = models[args.model]

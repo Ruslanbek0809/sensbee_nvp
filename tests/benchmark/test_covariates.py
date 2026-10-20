@@ -118,13 +118,6 @@ def test_the_opening_profile_uses_only_data_before_the_cutoff():
     assert np.array_equal(cov.open_profile(target_series(later, task), task, cutoff), profile)
 
 
-def test_build_refuses_a_set_of_another_kind():
-    task = SensorTask("temperature", "AVG", "regular", "2026-02-01", "2026-02-05")
-    series = target_series(_weather_raw(), task)
-    with pytest.raises(ValueError, match="IS FOR visitors SENSORS"):
-        cov.build("cal", STATION, {STATION: _weather_raw()}, series, task, pd.Timestamp("2026-02-01"))
-
-
 # Builds a set for STATION from the given raw frames and returns its window for one origin and 1-day context.
 def _window(name: str, frames: dict[str, pd.DataFrame], origin: pd.Timestamp) -> pd.DataFrame:
     task = TASKS[STATION]

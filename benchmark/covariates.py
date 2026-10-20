@@ -34,7 +34,7 @@ import numpy as np
 import pandas as pd
 
 from benchmark.snapshot import BUCKET_FREQ, bucket_15min
-from benchmark.tasks import HORIZON, STEP, TASKS, SensorTask, _excluded, training_series
+from benchmark.tasks import STEP, TASKS, SensorTask, _excluded, target_window, training_history
 
 logger = logging.getLogger(__name__)
 
@@ -52,6 +52,8 @@ WEATHER_VARIABLES = ("humidity", "global_radiation", "pressure_rel", "wind_speed
 STATIONS = tuple(name for name, task in TASKS.items() if task.kind == "regular")
 CALENDAR = ("tod_sin", "tod_cos", "dow_sin", "dow_cos", "public_holiday", "school_holiday")
 SUN = ("tod_sin", "tod_cos", "solar_elevation")
+GROUP_KINDS = {"calendar": "known", "open": "known", "sun": "known", "met": "past", "stations": "past",
+               "met_oracle": "oracle"}  # the kind of every column a feature group produces
 
 
 # A named covariate set: the task kind it applies to ("visitors" or "regular") and its feature groups.
@@ -60,16 +62,14 @@ class CovariateSet:
     kind: str
     groups: tuple[str, ...]
 
-    @property
-    def oracle(self) -> bool:
-        return "met_oracle" in self.groups
-
     # Kinds of the columns this set produces.
     @property
     def column_kinds(self) -> tuple[str, ...]:
-        kinds = {"calendar": "known", "open": "known", "sun": "known", "met": "past", "stations": "past",
-                 "met_oracle": "oracle"}
-        return tuple(sorted({kinds[group] for group in self.groups}))
+        return tuple(sorted({GROUP_KINDS[group] for group in self.groups}))
+
+    @property
+    def oracle(self) -> bool:
+        return "oracle" in self.column_kinds
 
 
 # Fixed before any run (Phase 4 plan, section A).
@@ -88,6 +88,12 @@ def berlin(index: pd.DatetimeIndex) -> pd.DatetimeIndex:
     return index.tz_localize("UTC").tz_convert(BERLIN)
 
 
+# Time of day of Berlin-local timestamps as (sin, cos).
+def _time_of_day(local: pd.DatetimeIndex) -> tuple[np.ndarray, np.ndarray]:
+    tod = 2 * np.pi * (local.hour * 60 + local.minute).to_numpy() / 1440
+    return np.sin(tod), np.cos(tod)
+
+
 # Calendar features in Berlin time: time of day and weekday as sin/cos, and the public and school holiday flags of the
 # local date. Raises when a timestamp's local date lies outside the holiday table.
 def calendar(index: pd.DatetimeIndex) -> pd.DataFrame:
@@ -96,19 +102,20 @@ def calendar(index: pd.DatetimeIndex) -> pd.DataFrame:
     if len(days) and (days.min() < HOLIDAYS_FROM or days.max() >= HOLIDAYS_TO):
         raise ValueError(f"DATES {days.min().date()}..{days.max().date()} OUTSIDE THE HOLIDAY TABLE "
                          f"{HOLIDAYS_FROM.date()}..{HOLIDAYS_TO.date()}")
-    tod = 2 * np.pi * (local.hour * 60 + local.minute).to_numpy() / 1440
+    tod_sin, tod_cos = _time_of_day(local)
     dow = 2 * np.pi * local.weekday.to_numpy() / 7
     school = np.zeros(len(index), dtype=bool)
     for first, last in SCHOOL_HOLIDAYS:
         school |= (days >= first) & (days <= last)
-    return pd.DataFrame({"tod_sin": np.sin(tod), "tod_cos": np.cos(tod), "dow_sin": np.sin(dow),
+    return pd.DataFrame({"tod_sin": tod_sin, "tod_cos": tod_cos, "dow_sin": np.sin(dow),
                          "dow_cos": np.cos(dow), "public_holiday": days.isin(PUBLIC_HOLIDAYS).astype(float),
                          "school_holiday": school.astype(float)}, index=index)
 
 
-# Solar elevation in degrees at naive-UTC timestamps (NOAA general solar position equations, see the header).
-def solar_elevation(index: pd.DatetimeIndex, latitude: float = ILMENAU[0],
-                    longitude: float = ILMENAU[1]) -> np.ndarray:
+# Solar elevation in degrees at Ilmenau at naive-UTC timestamps (NOAA general solar position equations, see the
+# header).
+def solar_elevation(index: pd.DatetimeIndex) -> np.ndarray:
+    latitude, longitude = ILMENAU
     year_days = np.where(index.is_leap_year, 366, 365)
     gamma = 2 * np.pi / year_days * (index.dayofyear - 1 + (index.hour - 12) / 24)
     eqtime = 229.18 * (0.000075 + 0.001868 * np.cos(gamma) - 0.032077 * np.sin(gamma)
@@ -131,9 +138,7 @@ def _local_slots(index: pd.DatetimeIndex) -> tuple[np.ndarray, np.ndarray]:
 # Opening profile of a hall: [7 weekdays, 96 slots] share of days with visitors > 0 in the training data before the
 # cutoff (from task.train_start, without the task's exclusions).
 def open_profile(series: pd.Series, task: SensorTask, cutoff: pd.Timestamp) -> np.ndarray:
-    history = training_series(series, cutoff)
-    if task.train_start is not None:
-        history = history.loc[pd.Timestamp(task.train_start):]
+    history = training_history(series, task, cutoff)
     history = history[~_excluded(history.index, task)]
     weekday, slot = _local_slots(history.index)
     share = (history.to_numpy() > 0).astype(float)
@@ -149,12 +154,11 @@ def open_share(index: pd.DatetimeIndex, profile: np.ndarray) -> np.ndarray:
 
 # The covariate frame of one sensor for a set: every column on the sensor's grid (calendar sets only inside the
 # holiday table), its kind, and info for run.json (the opening profile). cutoff: the period start, where the opening
-# profile is fitted. Weather columns are SensBee AVG buckets, unfilled.
+# profile is fitted. Weather columns are SensBee AVG buckets, unfilled. The runner checks that the set is of the
+# sensor's task kind.
 def build(name: str, sensor: str, frames: dict[str, pd.DataFrame], series: pd.Series, task: SensorTask,
           cutoff: pd.Timestamp) -> tuple[pd.DataFrame, dict[str, str], dict]:
     spec = COVARIATE_SETS[name]
-    if task.kind != spec.kind:
-        raise ValueError(f"COVARIATE SET {name} IS FOR {spec.kind} SENSORS, NOT {sensor} ({task.kind})")
     index = series.index
     if "calendar" in spec.groups:
         local_days = berlin(index).tz_localize(None).normalize()
@@ -166,28 +170,25 @@ def build(name: str, sensor: str, frames: dict[str, pd.DataFrame], series: pd.Se
         if group == "calendar":
             features = calendar(index)
             for column in CALENDAR:
-                columns[column], kinds[column] = features[column].to_numpy(), "known"
+                columns[column], kinds[column] = features[column].to_numpy(), GROUP_KINDS[group]
         elif group == "open":
             profile = open_profile(series, task, cutoff)
-            columns["open_share"], kinds["open_share"] = open_share(index, profile), "known"
+            columns["open_share"], kinds["open_share"] = open_share(index, profile), GROUP_KINDS[group]
             info["open_profile"] = np.round(profile, 4).tolist()
         elif group == "sun":
-            local = berlin(index)
-            tod = 2 * np.pi * (local.hour * 60 + local.minute).to_numpy() / 1440
-            columns["tod_sin"], columns["tod_cos"] = np.sin(tod), np.cos(tod)
-            columns["solar_elevation"] = np.asarray(solar_elevation(index))
-            kinds.update({column: "known" for column in SUN})
+            columns["tod_sin"], columns["tod_cos"] = _time_of_day(berlin(index))
+            columns["solar_elevation"] = solar_elevation(index)
+            kinds.update({column: GROUP_KINDS[group] for column in SUN})
         elif group in ("met", "met_oracle"):
-            kind = "oracle" if group == "met_oracle" else "past"
             for variable in WEATHER_VARIABLES:
                 columns[variable] = bucket_15min(frames[sensor], variable, "AVG").reindex(index).to_numpy()
-                kinds[variable] = kind
+                kinds[variable] = GROUP_KINDS[group]
         elif group == "stations":
             for station in STATIONS:
                 if station != sensor:
                     column = f"temperature_{station}"
                     columns[column] = bucket_15min(frames[station], "temperature", "AVG").reindex(index).to_numpy()
-                    kinds[column] = "past"
+                    kinds[column] = GROUP_KINDS[group]
     return pd.DataFrame(columns, index=index), kinds, info
 
 
@@ -199,7 +200,7 @@ def build(name: str, sensor: str, frames: dict[str, pd.DataFrame], series: pd.Se
 def covariate_window(frame: pd.DataFrame, kinds: dict[str, str], origin: pd.Timestamp,
                      context_index: pd.DatetimeIndex) -> pd.DataFrame:
     past = frame.loc[: origin - STEP].ffill().reindex(context_index)
-    future = frame.reindex(pd.date_range(origin, periods=HORIZON, freq=BUCKET_FREQ))
+    future = target_window(frame, origin)
     future[[column for column, kind in kinds.items() if kind == "past"]] = np.nan
     window = pd.concat([past, future])
     known = [column for column, kind in kinds.items() if kind == "known"]
