@@ -4,7 +4,8 @@
 # every raw value at or after the origin changes nothing a non-oracle forecast sees), and that the runner hands each
 # forecast its own window, through the split by length and the one-by-one retry, and a trainer only known columns
 # before the cutoff; and the "0 when closed" mask (Phase 4 step 4.3): zero exactly where the learned profile is
-# below the threshold, the base forecast untouched elsewhere.
+# below the threshold, the base forecast untouched elsewhere; and its Phase 5 form (D5-2), whose profile comes from
+# each context: hand-checked shares of 4 Mondays, and a run without any covariate set.
 
 import json
 from datetime import date, timedelta
@@ -15,7 +16,7 @@ import pandas as pd
 import pytest
 
 from benchmark import covariates as cov
-from benchmark.models.mask_models import mask_forecaster
+from benchmark.models.mask_models import mask_forecaster, recent_mask_forecaster
 from benchmark.runner import _predict, naive_forecaster, run
 from benchmark.snapshot import MANIFEST_NAME, write_raw_csv
 from benchmark.tasks import HORIZON, QUANTILE_LEVELS, TASKS, SensorTask, target_series
@@ -283,3 +284,43 @@ def test_a_masked_run_forecasts_zero_outside_the_learned_opening_hours(tmp_path)
     open_slot = (local.weekday == 0) & (local.hour == 9)  # the only slots with visitors before the cutoff
     assert open_slot.any() and (forecasts.loc[open_slot, "q0.5"] == 7.0).all()
     assert (forecasts.loc[~open_slot, [f"q{q:g}" for q in QUANTILE_LEVELS]] == 0).all().all()
+
+
+# A base forecaster of 7 everywhere, scored as probabilistic.
+def _sevens():
+    return lambda c, h, l, s: (np.full((len(c), h, len(l)), 7.0), ["ok"] * len(c)), {"point_only": False}
+
+
+# 28 days from Monday 5 Jan (4 Mondays). Local 09:00 (08:00 UTC) has visitors on all 4 Mondays, 09:15 on 1 of them
+# (share 0.25), 09:30 on 2 (0.5), nothing else. The horizon starts on Monday 2 Feb at 00:00 UTC, so step 32 is local
+# 09:00. θ 0.3 masks the 0.25 slot, θ 0.2 keeps it; every never-open slot is 0 either way.
+@pytest.mark.parametrize("threshold, kept", [(0.3, [32, 34]), (0.2, [32, 33, 34])])
+def test_the_recent_mask_takes_its_profile_from_the_context(threshold, kept):
+    index = pd.date_range("2026-01-05", periods=28 * 96, freq="15min")
+    values = pd.Series(0.0, index=index)
+    mondays = [pd.Timestamp(f"2026-01-{d:02d}") for d in (5, 12, 19, 26)]
+    for k, monday in enumerate(mondays):
+        values[monday + pd.Timedelta("8h")] = 5.0
+        if k == 0:
+            values[monday + pd.Timedelta("8h15min")] = 5.0
+        if k < 2:
+            values[monday + pd.Timedelta("8h30min")] = 5.0
+    forecast, params = recent_mask_forecaster(_sevens, threshold, "base")
+    quantiles, status = forecast([values], HORIZON, QUANTILE_LEVELS, 0)
+    assert status == ["ok"] and params["threshold"] == threshold and params["base_model"] == "base"
+    expected = np.zeros(HORIZON)
+    expected[kept] = 7.0
+    assert np.array_equal(quantiles[0, :, 4], expected) and (quantiles[0] == expected[:, None]).all()
+
+
+def test_a_recent_mask_run_needs_no_covariate_set(tmp_path):
+    snapshot_dir, tasks = _visitor_snapshot(tmp_path)
+    forecast, params = recent_mask_forecaster(_sevens, 0.5, "base")
+    run_dir = run(forecast, "mask_recent", snapshot_dir, tmp_path / "runs", tasks=tasks, context_days=(7,),
+                  model_params=params)
+    forecasts = pd.read_csv(run_dir / "forecasts.csv.gz", parse_dates=["timestamp"])
+    local = cov.berlin(pd.DatetimeIndex(forecasts["timestamp"]))
+    open_slot = (local.weekday == 0) & (local.hour == 9)  # every 7-day context holds exactly one Monday 09:00-09:45
+    assert open_slot.any() and (forecasts.loc[open_slot, "q0.5"] == 7.0).all()
+    assert (forecasts.loc[~open_slot, [f"q{q:g}" for q in QUANTILE_LEVELS]] == 0).all().all()
+    assert json.loads((run_dir / "run.json").read_text())["covariates"] is None

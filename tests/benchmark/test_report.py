@@ -14,6 +14,7 @@ import pytest
 
 pytest.importorskip("statsmodels")
 
+from benchmark.models.mask_models import recent_mask_forecaster  # noqa: E402
 from benchmark.report import dm_tests, make_report  # noqa: E402
 from benchmark.runner import naive_forecaster, run, seasonal_naive_forecaster  # noqa: E402
 from benchmark.snapshot import MANIFEST_NAME, write_raw_csv  # noqa: E402
@@ -236,6 +237,23 @@ def test_dm_base_pairs_a_masked_run_with_its_named_base(tmp_path):
                 context_days=(1,), run_id="mask", covariates="cal_open", model_params={"base_model": "naive"})]
     dm = pd.read_csv(make_report(runs, tmp_path / "reports", ("snaive", 1), tasks=tasks, report_id="r") / "dm_base.csv")
     assert set(dm["model"]) == {"mask0_naive_t0.1+cal_open"} and set(dm["base"]) == {"naive"}
+
+
+# A masked run without a covariate set (Phase 5: the profile comes from each context) is paired with its base too.
+def test_dm_base_pairs_a_masked_run_without_a_covariate_set(tmp_path):
+    noise = np.random.default_rng(0).normal(0, 3, len(TIMES))
+    snapshot_dir, tasks = _snapshot(tmp_path, visitors=np.maximum((np.tile(PATTERN, len(TIMES) // 96) - 10) * 20
+                                                                  + noise, 0))
+    out, halls = tmp_path / "runs", {"V": tasks["V"]}
+    forecast, params = recent_mask_forecaster(lambda: (naive_forecaster, {"point_only": True}), 0.5, "naive")
+    runs = [run(seasonal_naive_forecaster(96), "snaive", snapshot_dir, out, tasks=tasks, context_days=(1,),
+                run_id="snaive"),
+            run(naive_forecaster, "naive", snapshot_dir, out, tasks=halls, context_days=(1,), run_id="naive"),
+            run(forecast, "mask0_naive_recent_t0.5", snapshot_dir, out, tasks=halls, context_days=(1,),
+                run_id="mask", model_params=params)]
+    dm = pd.read_csv(make_report(runs, tmp_path / "reports", ("snaive", 1), tasks=tasks, report_id="r") / "dm_base.csv")
+    assert set(dm["model"]) == {"mask0_naive_recent_t0.5"} and set(dm["base"]) == {"naive"}
+    assert set(dm["loss"]) == {"MAE"} and (dm["n_origins"] == 13).all()
 
 
 def test_oracle_runs_get_their_own_section(tmp_path):

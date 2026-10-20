@@ -24,7 +24,8 @@
 # checked 2026-10-14); the weather stations lie within about 10 km, which moves the sun angle by a fraction of a degree.
 # The opening profile (D4-1): per Berlin weekday and 15-min local slot, the share of days with visitors_total > 0 in the
 # hall's training data before the cutoff (from task.train_start, without the task's exclusions), fitted once per sensor
-# and period like a trained model.
+# and period like a trained model. series_open_profile() computes the same share from any series; Phase 5 uses it on
+# each 28-day context, the profile the service can compute without knowing when a season starts (D5-2).
 
 import logging
 from dataclasses import dataclass
@@ -135,15 +136,20 @@ def _local_slots(index: pd.DatetimeIndex) -> tuple[np.ndarray, np.ndarray]:
     return local.weekday.to_numpy(), (local.hour * 4 + local.minute // 15).to_numpy()
 
 
+# Opening profile of a series: [7 weekdays, 96 slots] share of its days with a value > 0 in that Berlin weekday and
+# 15-min slot; slots the series doesn't cover are NaN.
+def series_open_profile(series: pd.Series) -> np.ndarray:
+    weekday, slot = _local_slots(series.index)
+    share = (series.to_numpy() > 0).astype(float)
+    profile = pd.Series(share).groupby([weekday, slot]).mean()
+    return profile.reindex(pd.MultiIndex.from_product([range(7), range(96)])).to_numpy().reshape(7, 96)
+
+
 # Opening profile of a hall: [7 weekdays, 96 slots] share of days with visitors > 0 in the training data before the
 # cutoff (from task.train_start, without the task's exclusions).
 def open_profile(series: pd.Series, task: SensorTask, cutoff: pd.Timestamp) -> np.ndarray:
     history = training_history(series, task, cutoff)
-    history = history[~_excluded(history.index, task)]
-    weekday, slot = _local_slots(history.index)
-    share = (history.to_numpy() > 0).astype(float)
-    profile = pd.Series(share).groupby([weekday, slot]).mean()
-    return profile.reindex(pd.MultiIndex.from_product([range(7), range(96)])).to_numpy().reshape(7, 96)
+    return series_open_profile(history[~_excluded(history.index, task)])
 
 
 # The profile value of each timestamp (its Berlin weekday and slot).

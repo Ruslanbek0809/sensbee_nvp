@@ -189,12 +189,13 @@ def dm_tests(metrics: pd.DataFrame, records: dict[str, dict], reference: tuple[s
 
 # Diebold–Mariano tests of each covariate run "<model>+<set>" against its values-only run (when both are in the
 # report) at the same context, per sensor, loss and horizon: "<model>", or the run named in model_params.base_model (a
-# "0 when closed" run against its unmasked base). Negative statistics mean the covariates (or the mask) lower the loss.
+# "0 when closed" run against its unmasked base, with or without a covariate set). Negative statistics mean the
+# covariates (or the mask) lower the loss.
 def dm_base(metrics: pd.DataFrame, records: dict[str, dict]) -> pd.DataFrame:
     out = []
     for model in records:
         base = records[model].get("model_params", {}).get("base_model") or model.split("+")[0]
-        if "+" not in model or base not in records:
+        if base == model or base not in records:
             continue
         for loss in ("MAE", "QL"):
             if loss == "QL" and (_point_only(records[model]) or _point_only(records[base])):
