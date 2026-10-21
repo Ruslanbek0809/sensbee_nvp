@@ -1,7 +1,13 @@
 # Tests for the LLMTime harness forecaster (benchmark/models/llmtime_models.py) with a mocked completion function
-# (no model load): point-only output (every quantile the median), a visible "fallback" when every sample is filtered,
-# no clipping of negative forecasts, one origin failing without failing the others, the seed set before every origin,
-# filter counts drained per call, and the registry entry. Needs torch (the bench venv).
+# (no model load):
+# - point-only output (every quantile is the median)
+# - a visible "fallback" when every sample is filtered
+# - no clipping of negative forecasts
+# - one origin failing does not fail the others
+# - the seed is set before every origin
+# - filter counts are drained per call
+# - the registry entry
+# Needs torch (the bench venv).
 
 import numpy as np
 import pandas as pd

@@ -1,9 +1,13 @@
-# Tests for src/models/tsfm_forecaster.py without torch or weights: the recipe per configured sensor, the dropped
-# still-filling bucket at the origin, the "0 when closed" mask from the context's own profile, the stations covariates
-# (past columns blanked over the horizon, a station without data left out), sorted deciles clipped at 0 for visitor
-# columns only, and a clear error when chronos isn't installed. Only the SensBee HTTP call and the Chronos-2 builder
-# are patched (autospec), so the real loader, fill rules, covariate window and mask run. The integration test loads the
-# real Chronos-2 (bench venv, weights cached): pytest -m integration.
+# Tests for src/models/tsfm_forecaster.py without torch or weights:
+# - the recipe per configured sensor
+# - the dropped still-filling bucket at the origin
+# - the "0 when closed" mask from the context's own profile
+# - the stations covariates (past columns blanked over the horizon, a station without data left out)
+# - sorted deciles clipped at 0 for visitor columns only
+# - a clear error when chronos isn't installed
+# Only the SensBee HTTP call and the Chronos-2 builder are patched (autospec). So the real loader, fill rules,
+# covariate window and mask run.
+# The integration test loads the real Chronos-2 (bench venv, weights cached): pytest -m integration.
 
 from datetime import datetime
 from typing import Callable, Optional

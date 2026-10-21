@@ -1,17 +1,29 @@
-# Tests for the trained forecasters in benchmark/models (TRAINED) on short synthetic series: every hyperparameter key
-# is one AutoGluon accepts, the fitted models use no date features and the capped lags, the input window fits the
-# 14-day context, DirectTabular trained on quantiles, no context sharing an id with a training item, output shape and
-# finite values, batch independence, RecursiveTabular as a point forecaster, the same seed giving the same forecasts,
-# and no silent fit without training data or when AutoGluon skips the model. DeepAR: the fitted network has no time
-# features and the capped lags, early stopping gets the final days as tuning data, the same seed gives the same
-# forecasts, and the distribution the network computes from a context doesn't depend on the other contexts in the
-# batch (its sampled paths do, through torch's Student-t sampler, whose random draws depend on every element's degrees
-# of freedom); these use 2 short epochs (same network). PatchTST: the same checks on its fitted network (one-week
-# context, no time features) and no training steps held out beyond the tuning days, since its validation loss scores
-# only the validated day. Both GluonTS models sample training windows only where a full input window of real data
-# exists. Known covariates (Phase 4, tabular models): a known column that drives the target reaches the fitted model,
-# changes the forecast when its future changes, keeps batch independence, and a forecaster trained with covariates
-# refuses a forecast without them. Run only where AutoGluon is installed (the bench venv).
+# Tests for the trained forecasters in benchmark/models (TRAINED) on short synthetic series.
+# All trained models:
+# - every hyperparameter key is one AutoGluon accepts
+# - the fitted models use no date features and the capped lags
+# - the input window fits the 14-day context
+# - no context shares an id with a training item
+# - output shape and finite values, batch independence, and the same seed giving the same forecasts
+# - no silent fit without training data or when AutoGluon skips the model
+# DirectTabular is trained on quantiles. RecursiveTabular is a point forecaster.
+# DeepAR:
+# - the fitted network has no time features and the capped lags
+# - early stopping gets the final days as tuning data
+# - the distribution the network computes from a context doesn't depend on the other contexts in the batch
+#   (its sampled paths do, through torch's Student-t sampler, whose random draws depend on every element's degrees
+#   of freedom)
+# - these tests use 2 short epochs (same network)
+# PatchTST:
+# - the same checks on its fitted network (one-week context, no time features)
+# - no training steps held out beyond the tuning days, since its validation loss scores only the validated day
+# Both GluonTS models sample training windows only where a full input window of real data exists.
+# Known covariates (Phase 4, tabular models):
+# - a known column that drives the target reaches the fitted model
+# - it changes the forecast when its future changes
+# - batch independence holds
+# - a forecaster trained with covariates refuses a forecast without them
+# Run only where AutoGluon is installed (the bench venv).
 
 import numpy as np
 import pandas as pd

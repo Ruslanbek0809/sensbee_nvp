@@ -1,8 +1,11 @@
-# Tests specific to the Toto adapter (benchmark/models/toto_models.py); the generic zero-shot checks are in
-# test_zero_shot.py. Toto samples, and its random draws depend on the batch layout, so batch independence is checked
-# on its deterministic mean path here. The cross-check runs AutoGluon's own TotoModel on the CPU (its GPU check is
-# patched, test only) in eval mode with the same seed at the forecast call. The input-building test needs no weights
-# and runs in the default bench suite; the others need the cached weights (never downloaded) and run with
+# Tests specific to the Toto adapter (benchmark/models/toto_models.py). The generic zero-shot checks are in
+# test_zero_shot.py.
+# - Toto samples, and its random draws depend on the batch layout. So batch independence is checked on its
+#   deterministic mean path here.
+# - The cross-check runs AutoGluon's own TotoModel on the CPU (its GPU check is patched, test only) in eval mode, with
+#   the same seed at the forecast call.
+# - The input-building test needs no weights and runs in the default bench suite.
+# - The other tests need the cached weights (never downloaded). Run them with
 #   HF_HUB_OFFLINE=1 venv-bench/bin/python -m pytest tests/benchmark/test_toto.py -m integration -q -s
 
 import os

@@ -1,8 +1,14 @@
-# Tests for benchmark/report.py on tiny harness runs over a synthetic snapshot (no network): the files, the reference
-# against itself, refusal of mixed snapshots, point-only models without probabilistic metrics, failed origins left
-# unimputed, the negative-quantile share and the clipped visitor table on a hand example, the Diebold–Mariano sign,
-# the common-origin report for a run on an origin subset, and for covariate runs (Phase 4) the skill per sensor group,
-# the DM tests against the values-only run, and the oracle section. The report always runs the DM tests, which need statsmodels: these tests run in the bench venv only.
+# Tests for benchmark/report.py on tiny harness runs over a synthetic snapshot (no network):
+# - the files, and the reference against itself
+# - refusal of mixed snapshots
+# - point-only models without probabilistic metrics
+# - failed origins left unimputed
+# - the negative-quantile share, and the clipped visitor table on a hand example
+# - the Diebold–Mariano sign
+# - the common-origin report for a run on an origin subset
+# - for covariate runs (Phase 4): the skill per sensor group, the DM tests against the values-only run, and the
+#   oracle section
+# The report always runs the DM tests, which need statsmodels. So these tests run in the bench venv only.
 
 import json
 from pathlib import Path
@@ -124,7 +130,7 @@ def test_negative_share_and_clipped_visitor_metrics_by_hand(tmp_path):
 
 def test_clipping_changes_nothing_for_non_negative_forecasts(tmp_path):
     # Visitors with closed (0) nights and noise, so the scale is finite and differs per origin and seasonal naive isn't
-    # exact; its forecasts are copies of past values (>= 0), so the clipped table must equal the main one.
+    # exact. Its forecasts are copies of past values (>= 0), so the clipped table must equal the main one.
     noise = np.random.default_rng(0).normal(0, 3, len(TIMES))
     visitors = np.maximum((np.tile(PATTERN, len(TIMES) // 96) - 10) * 20 + noise, 0)
     snapshot = _snapshot(tmp_path, visitors=visitors)

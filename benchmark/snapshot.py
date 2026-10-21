@@ -1,9 +1,9 @@
 # Frozen SensBee snapshots: raw rows as CSV.gz files plus a manifest with a SHA-256 hash per file.
 #
-# A snapshot stores raw rows (all columns, naive UTC timestamps), never pre-aggregated data. The 15-min series is
-# derived here with the same rule as SensBee's time_grouping: bucket label = floor(epoch / 900 s) * 900 s, then AVG
-# or MAX per bucket (sensor_mgmt/src/database/data_db.rs). Buckets without rows are absent, as on the server; gap
-# filling and masking belong to the harness, not to the snapshot.
+# A snapshot stores raw rows (all columns, naive UTC timestamps), never pre-aggregated data.
+# The 15-min series is derived here with the same rule as SensBee's time_grouping (sensor_mgmt/src/database/data_db.rs):
+# the bucket label is floor(epoch / 900 s) * 900 s, then AVG or MAX per bucket.
+# Buckets without rows are absent, as on the server. Gap filling and masking belong to the harness, not to the snapshot.
 
 import gzip
 import hashlib
@@ -32,7 +32,7 @@ AGGREGATIONS: dict[str, str] = {"AVG": "mean", "MAX": "max"}
 
 
 # Returns the sensbee_nvp commit and whether its working tree has uncommitted changes, for snapshot manifests and run
-# records. Without a git checkout (e.g. a copy on the cluster) both are None rather than a misleading "clean".
+# records. Without a git checkout (e.g. a copy on the cluster) both are None, not a misleading "clean".
 def git_state() -> dict:
     def git(*args: str) -> str:
         return subprocess.run(["git", "-C", str(PROJECT_ROOT), *args], capture_output=True, text=True).stdout.strip()
@@ -46,8 +46,9 @@ def sha256_file(path: Path) -> str:
         return hashlib.file_digest(f, "sha256").hexdigest()
 
 
-# Writes raw rows as gzip CSV and returns the file's SHA-256. gzip.compress with mtime=0 stores no timestamp and no
-# file name in the header, so the same data always gives the same bytes, whatever the file is called.
+# Writes raw rows as gzip CSV and returns the file's SHA-256.
+# gzip.compress with mtime=0 stores no timestamp and no file name in the header.
+# So the same data always gives the same bytes, whatever the file is called.
 def write_raw_csv(df: pd.DataFrame, path: Path) -> str:
     path.parent.mkdir(parents=True, exist_ok=True)
     csv_text = df.to_csv(index=False, date_format=TIME_FORMAT)
@@ -90,8 +91,9 @@ def _finite(value: float, digits: int) -> Optional[float]:
     return round(float(value), digits) if math.isfinite(value) else None
 
 
-# Data-quality numbers for one 15-min bucket series: coverage between its first and last bucket, the longest run of
-# missing buckets, the share of zeros, and the autocorrelation at 1 day and 1 week.
+# Data-quality numbers for one 15-min bucket series:
+# coverage between its first and last bucket, the longest run of missing buckets, the share of zeros,
+# and the autocorrelation at 1 day and 1 week.
 def quality_stats(series: pd.Series) -> dict:
     if series.empty:
         return {"buckets_present": 0}

@@ -2,18 +2,28 @@
 # harness forecaster (contract: benchmark/runner.py header).
 #
 # Each context goes through the service pipeline (scale, serialize, prompt, complete with token control, parse and
-# filter: llmtime_samples), and the forecast is the median of the valid samples mapped back to the original scale, as
-# in nvp_llms_forecast. Two service steps are changed for the benchmark: an origin whose samples are all filtered out
-# gets the last observed value with status "fallback" (the service does this silently), and visitor forecasts are not
-# clipped at 0 (D-B3). A handful of samples doesn't make honest deciles, so the forecaster is point-only: every
-# quantile is the median. Origins run one at a time, each after torch.manual_seed(seed), so a forecast doesn't depend
-# on its position in the batch. An origin whose generation raises is reported "failed" and the others go on, so the
-# runner never re-runs a whole batch of long generations. Completions, parse failures and samples removed per filter
-# rule are counted and drained into run.json per sensor (drain_diagnostics).
-# Local generation: the pinned revision in float16, one sample at a time (batch_size=1: five copies of a 14-day
-# prompt at once wouldn't fit next to the weights on an 18 GB Mac), top_p 0.9, always on one device (multi_gpu=False:
-# the multi-GPU path splits samples across devices by free memory and ignores batch_size). Building the forecaster
-# fails without a GPU backend (CUDA or MPS), so a 7B model never crawls on the CPU; the backend goes into run.json.
+# filter: llmtime_samples).
+# The forecast is the median of the valid samples mapped back to the original scale, as in nvp_llms_forecast.
+# Two service steps are changed for the benchmark:
+# - an origin whose samples are all filtered out gets the last observed value with status "fallback"
+#   (the service does this silently);
+# - visitor forecasts are not clipped at 0 (D-B3).
+# A handful of samples doesn't make honest deciles, so the forecaster is point-only: every quantile is the median.
+# Origins run one at a time, each after torch.manual_seed(seed), so a forecast doesn't depend on its position in the
+# batch.
+# An origin whose generation raises is reported "failed" and the others go on.
+# So the runner never re-runs a whole batch of long generations.
+# Completions, parse failures and samples removed per filter rule are counted and drained into run.json per sensor
+# (drain_diagnostics).
+# Local generation:
+# - the pinned revision in float16;
+# - one sample at a time (batch_size=1), because five copies of a 14-day prompt at once wouldn't fit next to the
+#   weights on an 18 GB Mac;
+# - top_p 0.9;
+# - always on one device (multi_gpu=False), because the multi-GPU path splits samples across devices by free memory
+#   and ignores batch_size.
+# Building the forecaster fails without a GPU backend (CUDA or MPS), so a 7B model never crawls on the CPU.
+# The backend goes into run.json.
 
 import logging
 from collections import Counter
@@ -28,8 +38,9 @@ TOP_P = 0.9
 BATCH_SIZE = 1
 
 
-# Builds an LLMTime forecaster for one model id and revision, and returns it with the effective settings. complete:
-# the completion function (called like nvp_llms.call_llm_completion); by default local generation with the model.
+# Builds an LLMTime forecaster for one model id and revision, and returns it with the effective settings.
+# complete: the completion function (called like nvp_llms.call_llm_completion). By default it is local generation
+# with the model.
 def llmtime_forecaster(model_id: str, revision: str, num_forecasts: int = 5, temperature: float = 0.9,
                        use_normalization: bool = True, alpha: float = 0.95, beta: float = 0.3, dtype: str = "float16",
                        complete: Optional[Callable] = None):

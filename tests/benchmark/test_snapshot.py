@@ -1,5 +1,8 @@
-# Tests for the frozen snapshot: 15-min bucketing like SensBee, month paging, hash-checked CSV.gz round trip, and a
-# full snapshot run against a fake server (no network; SensbeeClient.get_sensor_data is patched with autospec).
+# Tests for the frozen snapshot:
+# - 15-min bucketing like SensBee
+# - month paging
+# - hash-checked CSV.gz round trip
+# - a full snapshot run against a fake server (no network, SensbeeClient.get_sensor_data is patched with autospec)
 
 import gzip
 import json

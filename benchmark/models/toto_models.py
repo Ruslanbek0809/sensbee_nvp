@@ -1,20 +1,26 @@
-# Toto-Open-Base-1.0 (Datadog) as a zero-shot harness forecaster (contract: benchmark/runner.py header), run with the
-# copy of the Toto code that ships inside autogluon.timeseries 1.6.3 (models/toto/). That code is private API, pinned
-# by the AutoGluon version; AutoGluon's own TotoModel refuses to run without CUDA, but the copied code is plain torch,
-# so the adapter calls it directly on the CPU (the GPU check is the only part of AutoGluon's path that is bypassed).
+# Toto-Open-Base-1.0 (Datadog) as a zero-shot harness forecaster (contract: benchmark/runner.py header).
+# It runs with the copy of the Toto code that ships inside autogluon.timeseries 1.6.3 (models/toto/).
+# That code is private API, pinned by the AutoGluon version.
+# AutoGluon's own TotoModel refuses to run without CUDA, but the copied code is plain torch.
+# So the adapter calls it directly on the CPU. The GPU check is the only part of AutoGluon's path that is bypassed.
 #
-# The model is loaded once per build at a pinned Hugging Face revision with strict weight loading (the checkpoint and
-# the model have exactly the same keys, 151,306,080 parameters; checked 2026-10-12) and put in eval mode: AutoGluon's
-# loader leaves it in training mode, so its config's dropout of 0.1 would stay active while forecasting. Inputs are
-# built the way AutoGluon's TotoDataLoader builds them for gap-free contexts of one length (the runner's contract;
-# tasks.context_window fills gaps): contexts cut to the last 4,096 steps (AutoGluon's default), one variate per series
-# with its own id, every step observed, a 15-min interval and zero timestamps. Left padding is not neutral for Toto (a
-# 2-day context next to a 7-day one is forecast differently than alone, mean path, 2026-10-12), which is why a call
-# never mixes lengths. Toto forecasts in 64-step patches and feeds its sampled patches back, so 96 steps take 2
-# patches. The 9 deciles are the empirical quantiles of 256 sample paths (drawn 32 at a time, as AutoGluon does), so
-# the forecast depends on the seed, which is set at the start of every call. Series are independent (one variate
-# each, no cross-series attention), but the random draws depend on the batch layout, so a forecast alone equals it in
-# a batch only on the deterministic mean path.
+# The model is loaded once per build at a pinned Hugging Face revision with strict weight loading.
+# (The checkpoint and the model have exactly the same keys, 151,306,080 parameters; checked 2026-10-12.)
+# It is put in eval mode. AutoGluon's loader leaves it in training mode, so its config's dropout of 0.1 would stay
+# active while forecasting.
+# Inputs are built the way AutoGluon's TotoDataLoader builds them for gap-free contexts of one length
+# (the runner's contract; tasks.context_window fills gaps):
+# - contexts cut to the last 4,096 steps (AutoGluon's default);
+# - one variate per series, with its own id;
+# - every step observed, a 15-min interval and zero timestamps.
+# Left padding is not neutral for Toto. A 2-day context next to a 7-day one is forecast differently than alone
+# (mean path, 2026-10-12). That is why a call never mixes lengths.
+# Toto forecasts in 64-step patches and feeds its sampled patches back, so 96 steps take 2 patches.
+# The 9 deciles are the empirical quantiles of 256 sample paths (drawn 32 at a time, as AutoGluon does).
+# So the forecast depends on the seed, which is set at the start of every call.
+# Series are independent (one variate each, no cross-series attention).
+# But the random draws depend on the batch layout, so a forecast alone equals it in a batch only on the deterministic
+# mean path.
 
 import logging
 

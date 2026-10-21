@@ -1,4 +1,4 @@
-# Data access module for loading sensor data from local JSON files and SensBee API.
+# Data access module: loads sensor data from local JSON files and from the SensBee API.
 
 from .data_loader import (
     load_sensor_series_from_json,

@@ -1,4 +1,5 @@
-# Tests for load_sensor_series_from_api(): the 15-min grid must match SensBee's bucket labels and the default window must end at UTC now.
+# Tests for load_sensor_series_from_api(): the 15-min grid must match SensBee's bucket labels,
+# and the default window must end at UTC now.
 # Only the HTTP layer is patched (with autospec), so the real resampling and gap filling run on the fake server's data.
 
 import logging

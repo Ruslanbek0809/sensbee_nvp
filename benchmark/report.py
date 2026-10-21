@@ -1,17 +1,24 @@
-# Report over several harness runs (benchmark/runner.py output folders), built only from their raw files: per-cell
-# means, relative errors and skill against the reference (Seasonal Naive m = 96 at the 28-day context, decision D-B6),
-# Diebold–Mariano tests per sensor, failure counts, the share of negative quantiles, and a sensitivity table for the
-# visitor counts with every model's quantiles clipped at 0 (D-B3: clipping is never part of the main tables).
+# Report over several harness runs (benchmark/runner.py output folders), built only from their raw files.
+# It contains:
+# - per-cell means, relative errors and skill against the reference (Seasonal Naive m = 96 at the 28-day context,
+#   decision D-B6);
+# - Diebold–Mariano tests per sensor;
+# - failure counts and the share of negative quantiles;
+# - a sensitivity table for the visitor counts with every model's quantiles clipped at 0
+#   (D-B3: clipping is never part of the main tables).
 #
-# All runs must come from the same snapshot, period and harness settings. A model scored as a point forecaster
-# (run.json model_params.point_only, e.g. Theta, D-B4) gets no probabilistic metrics. A failed origin is never imputed:
-# its relative error and DM test are left empty with a note. With common_origins, every table is built only on the
-# (sensor, origin) pairs that all runs evaluated, e.g. to compare a model run on an origin subset (origin_stride) with
-# the others on exactly its origins; failures.csv still counts each run's own origins.
-# Covariate runs (Phase 4) are named "<model>+<set>" and cover one sensor group, so the skill is also given per group
-# (halls, weather) next to the main 5-sensor skill; dm_base.csv tests each covariate run against its own values-only
-# run ("<model>") on the same origins and context; oracle runs (observed future covariates, run.json covariates.oracle)
-# are upper bounds and get their own section in summary.md, apart from every other model.
+# All runs must come from the same snapshot, period and harness settings.
+# A model scored as a point forecaster (run.json model_params.point_only, e.g. Theta, D-B4) gets no probabilistic
+# metrics.
+# A failed origin is never imputed. Its relative error and DM test are left empty, with a note.
+# With common_origins, every table is built only on the (sensor, origin) pairs that all runs evaluated.
+# This lets a model run on an origin subset (origin_stride) be compared with the others on exactly its origins.
+# failures.csv still counts each run's own origins.
+# Covariate runs (Phase 4) are named "<model>+<set>" and cover one sensor group.
+# So the skill is also given per group (halls, weather), next to the main 5-sensor skill.
+# dm_base.csv tests each covariate run against its own values-only run ("<model>") on the same origins and context.
+# Oracle runs (observed future covariates, run.json covariates.oracle) are upper bounds.
+# They get their own section in summary.md, apart from every other model.
 
 import json
 import logging
@@ -36,8 +43,9 @@ QUANTILE_COLUMNS = [f"q{level:g}" for level in QUANTILE_LEVELS]
 KEYS = ["model", "sensor", "context", "horizon_steps"]
 
 
-# Reads each run's run.json and metrics.csv. Refuses runs that differ in snapshot, period or settings, and two runs of
-# the same model. Returns (records by model, metrics of all runs with a "model" column).
+# Reads each run's run.json and metrics.csv.
+# Refuses runs that differ in snapshot, period or settings, and two runs of the same model.
+# Returns (records by model, metrics of all runs with a "model" column).
 def load_runs(run_dirs: list[Path]) -> tuple[dict[str, dict], pd.DataFrame]:
     records, frames, first = {}, [], None
     for run_dir in run_dirs:
@@ -69,7 +77,7 @@ def _point_only(record: dict) -> bool:
     return bool(record.get("model_params", {}).get("point_only", False))
 
 
-# Mean metrics per model, sensor, context and horizon over the origins that didn't fail, with the origin counts.
+# Mean metrics per model, sensor, context and horizon over the origins that didn't fail, plus the origin counts.
 # Probabilistic metrics are NaN for point-only models.
 def cells(metrics: pd.DataFrame, records: dict[str, dict]) -> pd.DataFrame:
     ok = metrics[metrics["status"] != "failed"]
@@ -90,7 +98,7 @@ def _rows(metrics: pd.DataFrame, model: str, context: str, h: int, metric: str) 
 
 
 # Relative error of every (model, context) against the reference run at its context, per sensor, horizon and metric
-# (MASE, SQL). Origins are paired; a model with failed origins on a sensor gets no relative error and a note.
+# (MASE, SQL). Origins are paired. A model with failed origins on a sensor gets no relative error, and a note.
 def relative(metrics: pd.DataFrame, records: dict[str, dict], reference: tuple[str, int]) -> pd.DataFrame:
     ref_model, ref_days = reference
     if ref_model not in records:
@@ -118,7 +126,8 @@ def relative(metrics: pd.DataFrame, records: dict[str, dict], reference: tuple[s
     return pd.DataFrame(out)
 
 
-# Sensor groups of the skill: all main sensors (parking is secondary), and the main halls and weather stations apart.
+# Sensor groups of the skill: all main sensors (parking is secondary), and the main halls and weather stations
+# separately.
 def sensor_groups(tasks: dict[str, SensorTask]) -> dict[str, list[str]]:
     main = {name: task for name, task in tasks.items() if not task.secondary}
     groups = {"main": sorted(main),
@@ -128,7 +137,7 @@ def sensor_groups(tasks: dict[str, SensorTask]) -> dict[str, list[str]]:
 
 
 # Skill per model, context, horizon, metric and sensor group: the clipped geometric mean of the relative errors over
-# the group's sensors, only for cells that have a relative error on every sensor of the group.
+# the group's sensors. Only cells that have a relative error on every sensor of the group get a value.
 def skill(relative_table: pd.DataFrame, tasks: dict[str, SensorTask]) -> pd.DataFrame:
     out = []
     for group, sensors in sensor_groups(tasks).items():
@@ -149,7 +158,7 @@ def skill(relative_table: pd.DataFrame, tasks: dict[str, SensorTask]) -> pd.Data
 
 
 # One Diebold–Mariano row for a model's per-origin losses `a` against `b` (both indexed by origin), with `row` as its
-# labels; empty with a note when the origins don't pair, an origin failed, or the losses are identical.
+# labels. The values are empty, with a note, when the origins don't pair, an origin failed, or the losses are identical.
 def _dm_row(a: pd.Series, b: pd.Series, row: dict) -> dict:
     from statsmodels.tsa.api import diebold_mariano_test
     if set(a.index) != set(b.index) or a.isna().any() or b.isna().any():
@@ -165,9 +174,10 @@ def _dm_row(a: pd.Series, b: pd.Series, row: dict) -> dict:
             "mean_loss_difference": float((a - b).mean()), "note": ""}
 
 
-# Diebold–Mariano test of a model against the reference on per-origin losses of one sensor (MAE, and QL for
-# probabilistic models), with Newey–West lags from horizon=DM_HORIZON and the Harvey small-sample correction. Negative
-# statistics mean the model's loss is lower. Needs statsmodels (bench venv).
+# Diebold–Mariano test of a model against the reference on per-origin losses of one sensor
+# (MAE, and QL for probabilistic models).
+# It uses Newey–West lags from horizon=DM_HORIZON and the Harvey small-sample correction.
+# A negative statistic means the model's loss is lower. Needs statsmodels (bench venv).
 def dm_tests(metrics: pd.DataFrame, records: dict[str, dict], reference: tuple[str, int]) -> pd.DataFrame:
     ref_model, ref_days = reference
     out = []
@@ -187,10 +197,11 @@ def dm_tests(metrics: pd.DataFrame, records: dict[str, dict], reference: tuple[s
     return pd.DataFrame(out)
 
 
-# Diebold–Mariano tests of each covariate run "<model>+<set>" against its values-only run (when both are in the
-# report) at the same context, per sensor, loss and horizon: "<model>", or the run named in model_params.base_model (a
-# "0 when closed" run against its unmasked base, with or without a covariate set). Negative statistics mean the
-# covariates (or the mask) lower the loss.
+# Diebold–Mariano tests of each covariate run "<model>+<set>" against its base run, when both are in the report.
+# The test is per sensor, loss and horizon, at the same context.
+# The base run is the values-only run "<model>", or the run named in model_params.base_model
+# (a "0 when closed" run against its unmasked base, with or without a covariate set).
+# A negative statistic means the covariates (or the mask) lower the loss.
 def dm_base(metrics: pd.DataFrame, records: dict[str, dict]) -> pd.DataFrame:
     out = []
     for model in records:
@@ -213,9 +224,10 @@ def dm_base(metrics: pd.DataFrame, records: dict[str, dict]) -> pd.DataFrame:
     return pd.DataFrame(out)
 
 
-# Share of negative 0.1 and 0.5 quantiles per model, sensor, context and horizon, and the metrics of the visitor
-# sensors with every quantile clipped at 0 (a sensitivity table only). Reads each run's forecasts.csv.gz; keep: only
-# these (sensor, origin) pairs (None = all).
+# Returns two tables:
+# - the share of negative 0.1 and 0.5 quantiles per model, sensor, context and horizon;
+# - the metrics of the visitor sensors with every quantile clipped at 0 (a sensitivity table only).
+# Reads each run's forecasts.csv.gz. keep: only these (sensor, origin) pairs (None = all).
 def forecast_tables(records: dict[str, dict], metrics: pd.DataFrame, tasks: dict[str, SensorTask],
                     keep: Optional[pd.DataFrame] = None) -> tuple[pd.DataFrame, pd.DataFrame]:
     visitors = {name for name, task in tasks.items() if task.kind == "visitors"}
@@ -249,8 +261,9 @@ def forecast_tables(records: dict[str, dict], metrics: pd.DataFrame, tasks: dict
     return negative, clipped
 
 
-# Origin counts per model, sensor and context from each run.json: valid and evaluated origins (fewer with an origin
-# stride; runs before the stride option evaluated every valid origin), ok, fallback, failed and crossed quantile steps.
+# Origin counts per model, sensor and context from each run.json:
+# valid and evaluated origins, ok, fallback, failed, and crossed quantile steps.
+# With an origin stride fewer origins are evaluated. Runs from before the stride option evaluated every valid origin.
 def failures(records: dict[str, dict]) -> pd.DataFrame:
     rows = []
     for model, record in records.items():
@@ -262,7 +275,7 @@ def failures(records: dict[str, dict]) -> pd.DataFrame:
     return pd.DataFrame(rows)
 
 
-# A Markdown table from a DataFrame (no extra dependency); floats with 3 decimals, NaN as "n/a".
+# A Markdown table from a DataFrame, without an extra dependency. Floats get 3 decimals, NaN becomes "n/a".
 def _markdown(df: pd.DataFrame) -> str:
     def fmt(v) -> str:
         if isinstance(v, float):
@@ -273,7 +286,7 @@ def _markdown(df: pd.DataFrame) -> str:
     return "\n".join(lines)
 
 
-# Sort key: context labels by their number of days ("1d" < "7d" < "14d"; "all" last), other columns as they are.
+# Sort key: context labels by their number of days ("1d" < "7d" < "14d", "all" last). Other columns stay as they are.
 def _context_order(column: pd.Series) -> pd.Series:
     if column.name != "context":
         return column
@@ -299,8 +312,10 @@ def _metric_tables(cell_table: pd.DataFrame, title: str) -> list[str]:
     return parts
 
 
-# Headline tables: MASE and SQL per sensor and model at 24 h for each context, the skill per model, context and sensor
-# group (groups where it exists, and always the main group), and the oracle runs in their own section.
+# Headline tables:
+# - MASE and SQL per sensor and model at 24 h for each context;
+# - the skill per model, context and sensor group (groups where it exists, and always the main group);
+# - the oracle runs in their own section.
 def summary_markdown(cell_table: pd.DataFrame, skill_table: pd.DataFrame, records: dict[str, dict],
                      reference: tuple[str, int], common: Optional[int] = None) -> str:
     first = next(iter(records.values()))
@@ -332,9 +347,9 @@ def summary_markdown(cell_table: pd.DataFrame, skill_table: pd.DataFrame, record
     return "\n".join(parts)
 
 
-# Builds every table from the runs and writes them to out_root/<UTC>_report (refused if it exists). tasks: the sensor
-# tasks the runs used (default: all TASKS); common: only the (sensor, origin) pairs every run evaluated (see the
-# header). Returns the folder.
+# Builds every table from the runs and writes them to out_root/<UTC>_report. Refuses if that folder exists.
+# tasks: the sensor tasks the runs used (default: all TASKS).
+# common: only the (sensor, origin) pairs every run evaluated (see the header). Returns the folder.
 def make_report(run_dirs: list[Path], out_root: Path, reference: tuple[str, int],
                 tasks: Optional[dict[str, SensorTask]] = None, report_id: Optional[str] = None,
                 common: bool = False) -> Path:

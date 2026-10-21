@@ -1,6 +1,7 @@
-# Tests for benchmark/diagnostics.py on hand-computed examples: the amplitude ratio and shape correlation of a forecast
-# median against the reference's median, the error by origin hour, and the check that the reference repeats the last
-# observed day.
+# Tests for benchmark/diagnostics.py on hand-computed examples:
+# - the amplitude ratio and shape correlation of a forecast median against the reference's median
+# - the error by origin hour
+# - the check that the reference repeats the last observed day
 
 import math
 

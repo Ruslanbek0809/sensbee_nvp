@@ -1,9 +1,13 @@
 #!/usr/bin/env python3
-# Context-length diagnostics (benchmark/diagnostics.py) from harness run folders: per origin, the amplitude ratio and
-# shape correlation of each model's median against the reference's median (does the forecast keep the daily cycle?),
-# the relative error by origin hour, a check that the reference repeats the last observed day (on the snapshot), and
-# figures of a few origins per model and sensor. --runs must include the reference run (Seasonal Naive m = 96, whose
-# 28-day context is the reference, D-B6). Reads only the run folders and the snapshot; writes a new folder under --out.
+# Context-length diagnostics (benchmark/diagnostics.py) built from harness run folders.
+# It reports:
+# - per origin, the amplitude ratio and shape correlation of each model's median against the reference's median
+#   (does the forecast keep the daily cycle?);
+# - the relative error by origin hour;
+# - a check, on the snapshot, that the reference repeats the last observed day;
+# - figures of a few origins per model and sensor.
+# --runs must include the reference run: Seasonal Naive m = 96, whose 28-day context is the reference (D-B6).
+# It reads only the run folders and the snapshot. It writes a new folder under --out.
 #
 # Usage (from sensbee_nvp/; matplotlib comes with the bench venv):
 #   venv-bench/bin/python scripts/context_diagnostics.py --runs ../../benchmark_data/results/<run>... \
@@ -29,9 +33,10 @@ from benchmark.tasks import TASKS, target_series  # noqa: E402
 FORECAST_COLUMNS = ["sensor", "context", "origin", "step", "status", "y", "q0.1", "q0.5", "q0.9"]
 
 
-# Loads the runs (report.load_runs: same snapshot, period and settings, one run per model) and splits off the
-# reference at its context. Returns (records by model, model forecasts, model metrics, reference forecasts, reference
-# metrics); model rows carry a "model" column.
+# Loads the runs with report.load_runs (same snapshot, period and settings, one run per model).
+# Then splits off the reference at its context.
+# Returns (records by model, model forecasts, model metrics, reference forecasts, reference metrics).
+# Model rows carry a "model" column.
 def _load(run_dirs: list[Path]) -> tuple[dict, pd.DataFrame, pd.DataFrame, pd.DataFrame, pd.DataFrame]:
     ref_model, ref_context = REFERENCE[0], f"{REFERENCE[1]}d"
     records, metrics = load_runs(run_dirs)
@@ -49,8 +54,9 @@ def _load(run_dirs: list[Path]) -> tuple[dict, pd.DataFrame, pd.DataFrame, pd.Da
     return records, pd.concat(forecasts, ignore_index=True), metrics[~is_ref], reference, reference_metrics
 
 
-# Per model, sensor and context: the number of origins, how many have a defined shape (a constant reference, e.g. after
-# a closed day, has none), and the median amplitude ratio and shape correlation; contexts sorted by length.
+# Per model, sensor and context: the number of origins, how many have a defined shape,
+# and the median amplitude ratio and shape correlation.
+# A constant reference (e.g. after a closed day) has no shape. Contexts are sorted by length.
 def _shape_summary(shape: pd.DataFrame) -> pd.DataFrame:
     summary = shape.groupby(["model", "sensor", "context"]).agg(
         n_origins=("origin", "size"), n_defined=("shape_correlation", "count"),
@@ -59,9 +65,9 @@ def _shape_summary(shape: pd.DataFrame) -> pd.DataFrame:
     return summary.sort_values(["model", "sensor", "context"], key=_context_order, ignore_index=True)
 
 
-# A figure per model and sensor from that sensor's rows: rows = 3 origins (at a quarter, half and three quarters of the
-# reference's origins), columns = the given contexts; truth, the model's median with its 10–90% band, and the
-# reference's median.
+# One figure per model and sensor, drawn from that sensor's rows.
+# Rows are 3 origins, at a quarter, half and three quarters of the reference's origins. Columns are the given contexts.
+# Each panel shows the truth, the model's median with its 10-90% band, and the reference's median.
 def _figure(path: Path, model: str, sensor: str, rows: pd.DataFrame, reference: pd.DataFrame,
             contexts: list[str]) -> None:
     import matplotlib

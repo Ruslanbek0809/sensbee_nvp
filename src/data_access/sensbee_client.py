@@ -1,11 +1,11 @@
-# HTTP client for fetching sensor data from SensBee API. There are few things to note:
+# HTTP client for fetching sensor data from the SensBee API. Two things to know:
 #
-# All API fetches use server-side time_grouping for pre-aggregated buckets.
-# The server handles aggregation; the client only fills sparse gaps afterward.
+# All fetches use server-side time_grouping, so the server returns pre-aggregated buckets.
+# The server does the aggregation. The client only fills sparse gaps afterwards.
 #
-# limit must always be set when using time_grouping — otherwise the API
-# returns only 10 rows regardless of the window size (backend default).
-# This module computes limit automatically from the window and interval.
+# limit must always be set when time_grouping is used. Otherwise the API
+# returns only 10 rows, whatever the window size (backend default).
+# This module computes limit from the window and the interval.
 
 import logging
 import math
@@ -29,23 +29,26 @@ DEFAULT_API_KEY     = os.getenv("MANEBACH_WEATHER_STATION_MY_API_KEY_READ")
 DEFAULT_COLUMN_NAME = "temperature"
 
 # Server-side aggregation per column.
-# visitors_total → MAX: peak occupancy in the bucket (entries minus exits can go down,
-#   so MAX captures the busiest point in each 15-min window).
-# All other numeric columns → AVG by default.
-# NOTE: LAST is not supported by the SensBee backend.
+# - visitors_total uses MAX, the peak occupancy in the bucket. Entries minus exits can go down,
+#   so MAX captures the busiest point in each 15-min window.
+# - All other numeric columns use AVG by default.
+# LAST is not supported by the SensBee backend.
 COLUMN_AGGREGATIONS: dict[str, str] = {
     "visitors_total": "MAX",
 }
 DEFAULT_AGGREGATION = "AVG"
 
 
-# HTTP client for fetching sensor data from SensBee API.    
+# HTTP client for fetching sensor data from the SensBee API.
 class SensbeeClient:
 
     def __init__(self, base_url: str = DEFAULT_BASE_URL):
         self.base_url = base_url.rstrip("/")
 
-    # Fetches sensor data from the SensBee API. When time_grouping_seconds is set, the API groups events into fixed-size buckets and returns 'grouped_time' instead of 'created_at'. Each cols entry must include an aggregation: e.g. "visitors_total.MAX".
+    # Fetches sensor data from the SensBee API.
+    # If time_grouping_seconds is set, the API groups events into fixed-size buckets
+    # and returns 'grouped_time' instead of 'created_at'.
+    # Each cols entry must include an aggregation, e.g. "visitors_total.MAX".
     def get_sensor_data(
         self,
         sensor_id: str,
@@ -81,7 +84,8 @@ class SensbeeClient:
             resp.raise_for_status()
             return resp.json()
 
-# Fetches a sensor time series from SensBee, pre-aggregated into regular buckets by the server (time_grouping). The client fills any remaining sparse gaps.
+# Fetches a sensor time series from SensBee. The server pre-aggregates it into regular buckets (time_grouping).
+# The client fills any gaps that remain.
 def load_sensor_series_from_api(
     sensor_id: Optional[str] = None,
     api_key: Optional[str] = None,
@@ -104,7 +108,7 @@ def load_sensor_series_from_api(
         to_time   = datetime.now(timezone.utc).replace(tzinfo=None)
         from_time = to_time - timedelta(hours=window_hours)
 
-    # Auto-calculate limit: one bucket per interval across the full window + buffer.
+    # Compute limit: one bucket per interval over the full window, plus a buffer.
     window_minutes = (to_time - from_time).total_seconds() / 60
     limit = math.ceil(window_minutes / resample_interval_minutes) + 10
 
@@ -141,7 +145,8 @@ def load_sensor_series_from_api(
     series = pd.to_numeric(df.set_index(time_col)[column_name], errors="coerce")
 
     # Reindex over the full requested window so overnight zeros are included.
-    # SensBee labels buckets floor(epoch / interval) * interval (:00/:15/:30/:45), so the grid is floored the same way.
+    # SensBee labels buckets floor(epoch / interval) * interval (:00/:15/:30/:45).
+    # The grid is floored the same way.
     freq       = f"{resample_interval_minutes}min"
     full_index = pd.date_range(
         start=pd.Timestamp(from_time).floor(freq),

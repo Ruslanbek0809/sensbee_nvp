@@ -60,7 +60,7 @@ logger = logging.getLogger(__name__)
 #     return np.array(result["forecast"])
 
 
-# Generates a forecast for a single column.
+# Loads recent data for one sensor column from SensBee and forecasts it with the LLMTime pipeline.
 def forecast_single_column(
     sensor_id: str,
     api_key: Optional[str],
@@ -74,7 +74,7 @@ def forecast_single_column(
     use_normalization: bool = True,
     include_context: bool = False,
 ) -> dict:
-    # History window in hours; the SensBee client derives the API limit from it
+    # History window in hours. The SensBee client derives the API limit from it.
     window_hours = history_days * 24
 
     logger.info(
@@ -83,7 +83,7 @@ def forecast_single_column(
         f"provider={provider}, norm={use_normalization}, ctx={include_context}"
     )
 
-    # Loads latest data from SensBee API
+    # Load the latest data from the SensBee API
     series = load_sensor_series_from_api(
         sensor_id=sensor_id,
         api_key=api_key,
@@ -94,12 +94,12 @@ def forecast_single_column(
     if len(series) == 0:
         raise ValueError(f"NO DATA returned for sensor {sensor_id}")
     
-    # Calculates horizon in steps
+    # Convert the horizon from hours to steps
     sampling_minutes = (series.index[1] - series.index[0]).total_seconds() / 60
     steps_per_hour = 60 / sampling_minutes
     horizon_steps = int(horizon_hours * steps_per_hour)
     
-    # Generates forecast using LLM
+    # Forecast with the LLM
     forecast = nvp_llms_forecast(
         series=series,
         horizon=horizon_steps,
@@ -112,7 +112,7 @@ def forecast_single_column(
         include_context=include_context,
     )
     
-    # Generates forecast timestamps
+    # Timestamps of the forecast steps, continuing after the last data point
     last_ts = series.index[-1]
     forecast_timestamps = pd.date_range(
         start=last_ts + pd.Timedelta(minutes=sampling_minutes),
@@ -120,7 +120,7 @@ def forecast_single_column(
         freq=f"{sampling_minutes}min"
     )
     
-    # TODO for the future: Storing forecast to SensBee can be implemented here
+    # TODO: store the forecast in SensBee here
     
     return {
         "column": column_name,

@@ -16,7 +16,7 @@ logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
 
-# Here, we define the request body for the forecast endpoint.
+# Request body of the forecast endpoint.
 class ForecastRequest(BaseModel):
     sensor_id: str = Field(
         ..., 
@@ -71,7 +71,7 @@ class ForecastRequest(BaseModel):
         description="Prepends statistical context (min, max, median, trend) to the prompt. Can improve accuracy with raw values"
     )
 
-# Here, we define the response body for the forecast endpoint.
+# Response body of the forecast endpoint.
 class ForecastResponse(BaseModel):
     sensor_id: str
     column: str
@@ -88,7 +88,7 @@ class ForecastResponse(BaseModel):
     cached: bool = False
 
 
-# Here, we define the in-memory cache for the forecast responses.
+# In-memory cache of forecast responses.
 forecast_cache: dict[str, ForecastResponse] = {}
 
 
@@ -104,7 +104,7 @@ app = FastAPI(
 
 ### API Endpoints
 
-# Fast way to verify the service is up without triggering the logic. Also, it shows the cache size.
+# Checks that the service is up without running a forecast. Also returns the cache size.
 @app.get("/health")
 async def health_check() -> dict:
     return {
@@ -112,13 +112,13 @@ async def health_check() -> dict:
         "cache_size": len(forecast_cache),
     }
 
-# Here, we generate on-demand forecast response based on user-provided parameters.
+# Runs a forecast on demand for the sensor, column and horizon in the request.
 @app.post("/forecast", response_model=ForecastResponse)
 async def generate_forecast(request: ForecastRequest) -> ForecastResponse:
     logger.info(f"/forecast Forecast POST request: sensor={request.sensor_id}, column={request.column}, horizon={request.horizon_hours}h, history={request.history_days}d, provider={request.provider}")
     
     try:
-        # Run forecast in thread pool to avoid blocking the event loop.
+        # Run the forecast in a worker thread so it does not block the event loop.
         result = await asyncio.to_thread(
             forecast_single_column,
             sensor_id=request.sensor_id,
@@ -134,7 +134,7 @@ async def generate_forecast(request: ForecastRequest) -> ForecastResponse:
             include_context=request.include_context,
         )
         
-        # Build response
+        # Build the response
         response = ForecastResponse(
             sensor_id=request.sensor_id,
             column=request.column,
@@ -151,7 +151,7 @@ async def generate_forecast(request: ForecastRequest) -> ForecastResponse:
             cached=False,
         )
         
-        # Store in cache
+        # Cache the response
         cache_key = build_cache_key(request.sensor_id, request.column)
         forecast_cache[cache_key] = response
         logger.info(f"/forecast CACHED forecast: {cache_key}")
@@ -166,7 +166,7 @@ async def generate_forecast(request: ForecastRequest) -> ForecastResponse:
         raise HTTPException(status_code=500, detail=str(e))
 
 
-# Here, you can retrieve a cached forecast for the given sensor and column. 404 if no cached forecast exists.
+# Returns the cached forecast for the sensor and column. Answers 404 if there is none.
 @app.get("/forecast/cache/{sensor_id}/{column}", response_model=ForecastResponse)
 async def get_cached_forecast(sensor_id: str, column: str) -> ForecastResponse:
     cache_key = build_cache_key(sensor_id, column)
@@ -182,7 +182,7 @@ async def get_cached_forecast(sensor_id: str, column: str) -> ForecastResponse:
     return response
 
 
-# Here, you can list all cached forecasts with their metadata.
+# Lists all cached forecasts with their metadata.
 @app.get("/forecast/cache")
 async def list_cached_forecasts() -> dict:
     return {
@@ -199,7 +199,7 @@ async def list_cached_forecasts() -> dict:
     }
 
 
-# Here, you can clear all cached forecasts manually with a request.
+# Clears all cached forecasts.
 @app.delete("/forecast/cache")
 async def clear_cache() -> dict:
     count = len(forecast_cache)

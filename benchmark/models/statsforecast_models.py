@@ -1,8 +1,12 @@
-# statsforecast's MSTL as a harness forecaster (contract: benchmark/runner.py header): the seasonal baselines that
-# handle a daily season of 96 steps, which AutoETS and seasonal AutoARIMA can't do in our budget (task 4 spike;
-# baselines step). MSTL removes the daily (and weekly) pattern with STL, forecasts the rest with a non-seasonal model
-# (ETS "ZZN", or AutoARIMA: the classic STL + ARIMA), and adds the pattern back. Its intervals come from that model
-# (normal), shifted by the seasonal forecast. Each context is fit on its own, in parallel.
+# statsforecast's MSTL as a harness forecaster (contract: benchmark/runner.py header).
+# These are the seasonal baselines that handle a daily season of 96 steps.
+# AutoETS and seasonal AutoARIMA can't do that in our budget (task 4 spike; baselines step).
+# MSTL works in three steps:
+# - it removes the daily (and weekly) pattern with STL;
+# - it forecasts the rest with a non-seasonal model (ETS "ZZN", or AutoARIMA: the classic STL + ARIMA);
+# - it adds the pattern back.
+# Its intervals come from that model (normal), shifted by the seasonal forecast.
+# Each context is fit on its own, in parallel.
 
 import logging
 
@@ -14,8 +18,8 @@ from benchmark.models.autogluon_models import physical_cores
 logger = logging.getLogger(__name__)
 
 
-# Forecast of one context: the mean for the 0.5 level and the statsforecast interval bounds for the others, mapped the
-# way AutoGluon maps quantiles (q < 0.5 → "lo-{|q − 0.5|·200}", q > 0.5 → "hi-…").
+# Forecast of one context: the mean for the 0.5 level and the statsforecast interval bounds for the others.
+# The bounds are mapped the way AutoGluon maps quantiles (q < 0.5 → "lo-{|q − 0.5|·200}", q > 0.5 → "hi-…").
 def _mstl_one(y: np.ndarray, season_length: list[int], trend: str, horizon: int,
               levels: tuple[float, ...]) -> np.ndarray:
     from statsforecast.models import MSTL, AutoARIMA, AutoETS
@@ -30,8 +34,9 @@ def _mstl_one(y: np.ndarray, season_length: list[int], trend: str, horizon: int,
     return np.stack(columns, axis=1)
 
 
-# Builds an MSTL forecaster with the given seasons (steps) and the model for the seasonally adjusted series ("ets":
-# AutoETS(model="ZZN"); "arima": non-seasonal AutoARIMA), and returns it with its parameters.
+# Builds an MSTL forecaster with the given seasons (steps) and returns it with its parameters.
+# trend picks the model for the seasonally adjusted series: "ets" is AutoETS(model="ZZN"), "arima" is non-seasonal
+# AutoARIMA.
 def mstl_forecaster(season_length: list[int], trend: str = "ets"):
     if trend not in ("ets", "arima"):
         raise ValueError(f"UNKNOWN TREND MODEL {trend}")

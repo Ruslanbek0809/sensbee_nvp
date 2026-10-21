@@ -1,9 +1,14 @@
 #!/usr/bin/env python3
-# Builds the baseline report (benchmark/report.py) from harness run folders: per-cell means, relative errors and skill
-# against the reference, Diebold–Mariano tests, failures, negative-quantile shares and the clipped visitor sensitivity
-# table, plus summary.md. Reads only the run folders; writes a new folder under --out. Needs the bench venv
-# (statsmodels for the DM tests). --common-origins builds every table on the (sensor, origin) pairs that all runs
-# evaluated (e.g. a model run on an origin subset against the others on exactly those origins).
+# Builds the baseline report (benchmark/report.py) from harness run folders.
+# It writes these tables, plus summary.md:
+# - per-cell means, relative errors and skill against the reference;
+# - Diebold-Mariano tests;
+# - failures and negative-quantile shares;
+# - the clipped visitor sensitivity table.
+# It reads only the run folders and writes a new folder under --out.
+# It needs the bench venv (statsmodels for the DM tests).
+# --common-origins builds every table on the (sensor, origin) pairs that all runs evaluated.
+# Example: a model run on an origin subset, compared with the others on exactly those origins.
 #
 # Usage (from sensbee_nvp/):
 #   venv-bench/bin/python scripts/make_report.py --runs ../../benchmark_data/results/<run>... \

@@ -1,12 +1,15 @@
 #!/usr/bin/env python3
-# Download and cache models on login node for offline use on GPU nodes. Run this on makalu48. python download_models.py --all or python download_models.py --model mistral-7b
+# Downloads and caches models on the login node, so the GPU nodes can use them offline.
+# Run this on makalu48:
+#   python download_models.py --all
+#   python download_models.py --model mistral-7b
 
 import argparse
 import os
 import sys
 from pathlib import Path
 
-# Add project root to path
+# Put the project root on the import path
 PROJECT_ROOT = Path(__file__).parent.parent
 sys.path.insert(0, str(PROJECT_ROOT))
 
@@ -24,7 +27,7 @@ MODELS_TO_DOWNLOAD = {
 DEFAULT_MODELS = ["mistral-7b", "mistral-7b-instruct", "llama2-7b", "llama2-7b-chat"]
 
 
-# Check if internet is available
+# Checks whether the internet is reachable
 def check_internet():
     import socket
     try:
@@ -34,7 +37,7 @@ def check_internet():
         return False
 
 
-# Download and cache a model
+# Downloads one model and caches it
 def download_model(model_name: str, model_id: str, hf_home: str):
     print(f"\n{'='*60}")
     print(f"Downloading: {model_name}")

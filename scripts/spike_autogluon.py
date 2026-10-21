@@ -1,9 +1,13 @@
 #!/usr/bin/env python3
-# AutoGluon spike (Phase 1 task 4): times one fit of AutoGluon's local models (AutoETS, AutoARIMA, Theta, Naive,
-# SeasonalNaive; season 96) per context length on real snapshot contexts, checks the defaults that matter for the
-# benchmark (fallback model, seasonality drop, interval shape, hyperparameter keys), and projects the cost of a full
-# test run. Writes timings.csv, projection.csv and checks.json to a new folder under --out. No accuracy numbers: a few
-# origins are not an evaluation. Needs the bench venv (requirements-bench.txt); no network.
+# AutoGluon spike (Phase 1 task 4). It does three things:
+# - times one fit of AutoGluon's local models (AutoETS, AutoARIMA, Theta, Naive, SeasonalNaive; season 96) per context
+#   length, on real snapshot contexts;
+# - checks the defaults that matter for the benchmark (fallback model, seasonality drop, interval shape,
+#   hyperparameter keys);
+# - projects the cost of a full test run.
+# It writes timings.csv, projection.csv and checks.json to a new folder under --out.
+# It gives no accuracy numbers, because a few origins are not an evaluation.
+# It needs the bench venv (requirements-bench.txt) and no network.
 #
 # Usage (from sensbee_nvp/):
 #   venv-bench/bin/python scripts/spike_autogluon.py --snapshot ../../benchmark_data/snapshots/sensbee-2026-10-01 \
@@ -37,9 +41,10 @@ from benchmark.tasks import (  # noqa: E402
 
 logger = logging.getLogger(__name__)
 
-# Every default we rely on, set explicitly. max_ts_length=None: the harness decides the context length (the default
-# 2500 would cut a 28-day context). use_fallback_model=False: AutoGluon only logs how many series fell back, never
-# which. n_jobs=1: one timing is one fit on one core.
+# Every default we rely on, set explicitly.
+# - max_ts_length=None: the harness decides the context length. The default 2500 would cut a 28-day context.
+# - use_fallback_model=False: AutoGluon only logs how many series fell back, never which.
+# - n_jobs=1: one timing is one fit on one core.
 COMMON = {"seasonal_period": SEASON, "max_ts_length": None, "use_fallback_model": False, "n_jobs": 1}
 MODELS = {
     "AutoETS": {**COMMON, "model": "ZZZ", "damped": False},
@@ -86,8 +91,8 @@ def _tsdf(series_by_item: dict[str, pd.Series]):
     return TimeSeriesDataFrame.from_data_frame(pd.concat(frames, ignore_index=True))
 
 
-# A predictor with exactly one model and no ensemble or model selection. Local models only store their settings in
-# fit(); the fit per series happens inside predict().
+# A predictor with exactly one model and no ensemble or model selection.
+# Local models only store their settings in fit(). The fit per series happens inside predict().
 def _fit_predictor(name: str, params: dict, train, path: Path):
     from autogluon.timeseries import TimeSeriesPredictor
     predictor = TimeSeriesPredictor(prediction_length=HORIZON, freq=BUCKET_FREQ, quantile_levels=list(QUANTILE_LEVELS),
@@ -96,8 +101,12 @@ def _fit_predictor(name: str, params: dict, train, path: Path):
                          random_seed=0)
 
 
-# Shape checks of one forecast: finite values, crossing quantiles, mean vs median, symmetry of the 80% interval
-# around the median (≈ 0 for Gaussian intervals), and the lowest 0.1 quantile (below 0 matters for counts).
+# Shape checks of one forecast:
+# - finite values;
+# - crossing quantiles;
+# - mean vs median;
+# - symmetry of the 80% interval around the median (about 0 for Gaussian intervals);
+# - the lowest 0.1 quantile (a value below 0 matters for counts).
 def _quantile_checks(preds: pd.DataFrame) -> dict:
     q = preds[[str(level) for level in QUANTILE_LEVELS]].to_numpy(dtype=float)
     mean = preds["mean"].to_numpy(dtype=float)
@@ -124,8 +133,9 @@ def _check_keys() -> dict:
     return out
 
 
-# AutoETS on the last FALLBACK_STEPS values of a context: without the fallback model the error must surface; with it,
-# AutoGluon must silently return its fallback (here the naive branch: the last value at every step).
+# AutoETS on the last FALLBACK_STEPS values of a context.
+# Without the fallback model the error must surface.
+# With it, AutoGluon must silently return its fallback. Here that is the naive branch: the last value at every step.
 def _fallback_check(train, context: pd.Series, tmp: Path, timeout: int) -> dict:
     tiny = context.iloc[-FALLBACK_STEPS:]
     out = {}
@@ -140,10 +150,11 @@ def _fallback_check(train, context: pd.Series, tmp: Path, timeout: int) -> dict:
     return out
 
 
-# ETS checks with statsforecast directly: the components AutoETS chooses per context length, whether AutoGluon's
-# 1-day AutoETS equals a non-seasonal "ZZN" fit (AutoGluon drops the season below 2 seasons), and the AICc and
-# residual variance of fixed additive models with and without the season on the longest context (why the season
-# isn't chosen).
+# ETS checks with statsforecast directly:
+# - the components AutoETS chooses per context length;
+# - whether AutoGluon's 1-day AutoETS equals a non-seasonal "ZZN" fit (AutoGluon drops the season below 2 seasons);
+# - the AICc and residual variance of fixed additive models with and without the season, on the longest context.
+#   This shows why the season is not chosen.
 def _ets_checks(contexts: dict[int, pd.Series], ag_one_day_mean: Optional[np.ndarray], timeout: int) -> dict:
     from statsforecast.ets import ets_f
     from statsforecast.models import AutoETS
@@ -166,8 +177,9 @@ def _ets_checks(contexts: dict[int, pd.Series], ag_one_day_mean: Optional[np.nda
             f"fixed_models_{max(contexts)}d": fixed}
 
 
-# Per model and context length: fit seconds over the ok fits, and the projected cost of a full test run (one fit per
-# valid origin and context). A cell with a timeout or a skip has no mean: its fits take at least the timeout.
+# Per model and context length: the mean fit seconds over the ok fits, and the projected cost of a full test run.
+# The projection assumes one fit per valid origin and context.
+# A cell with a timeout or a skip has no mean, because its fits take at least the timeout.
 def _projection(timings: pd.DataFrame, n_origins: int, cores: int) -> pd.DataFrame:
     rows = []
     for (model, days), cell in timings.groupby(["model", "context_days"], sort=False):
@@ -185,7 +197,7 @@ def _projection(timings: pd.DataFrame, n_origins: int, cores: int) -> pd.DataFra
     return pd.DataFrame(rows)
 
 
-# Defaults of a statsforecast model's constructor (what we didn't set), as text so they fit in JSON.
+# Defaults of a statsforecast model's constructor (what we did not set), as text so they fit in JSON.
 def _defaults(cls) -> dict:
     return {k: repr(p.default) for k, p in inspect.signature(cls.__init__).parameters.items() if k != "self"}
 
@@ -212,7 +224,7 @@ def main() -> None:
     frames = load_snapshot(args.snapshot)
     manifest = json.loads((args.snapshot / MANIFEST_NAME).read_text())
 
-    # Valid test origins over all tasks: the number of fits per context length in a full test run.
+    # Valid test origins over all tasks. This is the number of fits per context length in a full test run.
     series = {name: target_series(frames[name], task) for name, task in TASKS.items()}
     tables = {name: origin_table(series[name], task, "test") for name, task in TASKS.items()}
     n_origins = int(sum(table["valid"].sum() for table in tables.values()))

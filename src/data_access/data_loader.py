@@ -1,6 +1,6 @@
 
-# Data loader module for loading sensor series from local JSON files.
-# Handles both regular (15-min interval) and irregular (event-based) sensor data.
+# Data loader module: loads sensor series from local JSON files.
+# It handles regular sensors (15-min interval) and event-based sensors (irregular timestamps).
 
 import json
 import logging
@@ -15,26 +15,29 @@ logger = logging.getLogger(__name__)
 DEFAULT_DATA_PATH = Path(__file__).parent.parent.parent / "data" / "real_sensbee_json_data.json"
 DEFAULT_COLUMN_NAME = "temperature"
 
-# Event-based sensors fire one record per visitor entry/exit.
-# They need a different fill strategy: short gaps → ffill (count unchanged),
-# long gaps → fill with 0 (facility is closed overnight).
+# Event-based sensors fire one record per visitor entry or exit.
+# They need a different fill strategy from regular sensors:
+# - short gaps are forward-filled (the count is unchanged),
+# - long gaps are filled with 0 (the facility is closed overnight).
 EVENT_BASED_COLUMNS = {"visitors_total", "visitor_change"}
 
-# After this many minutes with no events, the facility is considered closed.
-# Gaps shorter than this are forward-filled (count didn't change).
-# Gaps at least this long are filled with 0 (closed, count resets to 0).
+# After this many minutes without events, the facility counts as closed.
+# Gaps shorter than this are forward-filled (the count did not change).
+# Gaps at least this long are filled with 0 (closed, the count resets to 0).
 CLOSURE_GAP_MINUTES = 120  # 2 hours
 
-# LLMTime (Gruver et al. 2023) finds ~500 values near-optimal for LLM input.
-# At 15-min intervals: 7-day = 672 pts, 14-day = 1344 pts.
-# Exceeding this budget is intentional in the benchmark to test whether
-# over-long input hurts or improves forecast quality.
+# LLMTime (Gruver et al. 2023) finds about 500 values near-optimal as LLM input.
+# At 15-min intervals, 7 days are 672 points and 14 days are 1344 points.
+# The benchmark exceeds this budget on purpose, to test whether
+# an over-long input hurts or improves the forecast.
 TOKEN_BUDGET_MAX_POINTS = 700
 
 
-# Fills a regular-grid event-based series (visitor counts): gaps up to CLOSURE_GAP_MINUTES are forward-filled (count
-# unchanged), longer gaps become 0 (facility closed), negative sensor anomalies become 0. Shared by the fixture loader
-# and the SensBee client, so fixtures and live data follow one rule.
+# Fills gaps in an event-based series (visitor counts) on a regular grid.
+# - Gaps up to CLOSURE_GAP_MINUTES are forward-filled (the count is unchanged).
+# - Longer gaps become 0 (facility closed).
+# - Negative sensor anomalies become 0.
+# The fixture loader and the SensBee client both use it, so fixtures and live data follow one rule.
 def fill_event_series(series: pd.Series, resample_interval_minutes: int) -> pd.Series:
     ffill_limit = max(1, CLOSURE_GAP_MINUTES // resample_interval_minutes)
     return series.ffill(limit=ffill_limit).fillna(0).clip(lower=0)
@@ -46,7 +49,7 @@ def load_sensor_series_from_json(
     column_name: Optional[str] = None,
     resample_interval_minutes: Optional[int] = 15,
 ) -> pd.Series:
-    # Apply default parameters if not provided
+    # Use the defaults for parameters that were not passed
     data_path = Path(path) if path else DEFAULT_DATA_PATH
     column_name = column_name or DEFAULT_COLUMN_NAME
 
@@ -66,8 +69,8 @@ def load_sensor_series_from_json(
 
     df = pd.DataFrame(data)
 
-    # Support both raw exports ('created_at') and pre-aggregated exports
-    # downloaded with time_grouping ('grouped_time').
+    # Accept raw exports ('created_at') and exports downloaded
+    # with time_grouping ('grouped_time').
     if "grouped_time" in df.columns:
         time_col = "grouped_time"
     elif "created_at" in df.columns:

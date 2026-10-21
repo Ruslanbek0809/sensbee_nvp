@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 
-# Runs a systematic evaluation of the NVP forecasting pipeline across sensors, window sizes, providers/models, and parameter configurations.
+# Runs a systematic evaluation of the NVP forecasting pipeline.
+# It covers sensors, window sizes, providers and models, and parameter configurations.
 
 # Outputs:
 #   results/report_benchmark_<timestamp>.json   — raw data for every run
@@ -67,8 +68,8 @@ WINDOWS = {
     "14-day": {"steps": 1344, "interval_min": 15},
 }
 
-# Context length limits (in tokens) for different models.
-# Used to truncate input when it would exceed the model's context.
+# Context length limits (in tokens) per model.
+# The input is cut when it would exceed the model's context.
 MODEL_CONTEXT_LIMITS = {
     "gpt-3.5-turbo-instruct": 4097,  # OpenAI's limit
     "llama2-7b": 4096,               # Llama-2 base context
@@ -79,10 +80,10 @@ MODEL_CONTEXT_LIMITS = {
     # Groq Llama-3.3-70B has 128K context, no limit concerns
 }
 
-# Tokens per data point by provider/model type.
-# Based on actual API error feedback:
-# - GPT normalized (672 steps) = ~4102 prompt tokens → ~6.1 tokens/value
-# - GPT raw values (494 steps) = ~3724 prompt tokens → ~7.5 tokens/value
+# Tokens per data point, by provider and model type.
+# The numbers come from what the API reported in its error messages:
+# - GPT normalized (672 steps) = ~4102 prompt tokens, so ~6.1 tokens/value
+# - GPT raw values (494 steps) = ~3724 prompt tokens, so ~7.5 tokens/value
 # - Output max_tokens = horizon * 5 * 1.3 (from nvp_llms.py)
 TOKENS_PER_VALUE_NORMALIZED = {
     "openai": 6.1,      # GPT with integer format + spacing
@@ -91,7 +92,7 @@ TOKENS_PER_VALUE_NORMALIZED = {
     "mistral": 5.5,     # Mistral API
 }
 
-# Raw values use more tokens (decimal numbers like "23.456" vs integer "537")
+# Raw values use more tokens, because they are decimals like "23.456" instead of integers like "537".
 TOKENS_PER_VALUE_RAW = {
     "openai": 7.8,      # GPT with decimal format (measured: 494 steps = 3724 tokens)
     "groq": 6.5,        # LLaMA-based with decimals
@@ -99,7 +100,7 @@ TOKENS_PER_VALUE_RAW = {
     "mistral": 7.0,     # Mistral API with decimals
 }
 
-# Calculates the maximum number of input steps that fit within model's context. 
+# Calculates the maximum number of input steps that fit in the model's context.
 def get_max_input_steps(
     provider: str,
     model: Optional[str],
@@ -107,7 +108,7 @@ def get_max_input_steps(
     include_context: bool = False,
     use_normalization: bool = True,
 ) -> Optional[int]:
-    # Determine model key for context limit
+    # Pick the key used to look up the context limit
     model_key = None
     if provider == "openai":
         model_key = model or "gpt-3.5-turbo-instruct"
@@ -119,16 +120,16 @@ def get_max_input_steps(
     
     context_limit = MODEL_CONTEXT_LIMITS[model_key]
     
-    # Select token rate based on normalization setting
+    # Pick the token rate for normalized or raw values
     if use_normalization:
         tokens_per_value = TOKENS_PER_VALUE_NORMALIZED.get(provider, 5.0)
     else:
         tokens_per_value = TOKENS_PER_VALUE_RAW.get(provider, 7.0)
     
-    # Output tokens calculated same as nvp_llms.py: horizon * 5 * 1.3
-    output_tokens = int(horizon * 5 * 1.3)  # Match nvp_llms.py calculation
+    # Output tokens use the same formula as nvp_llms.py: horizon * 5 * 1.3
+    output_tokens = int(horizon * 5 * 1.3)  # Same calculation as nvp_llms.py
     
-    # Prompt overhead (system message, formatting, etc.)
+    # Prompt overhead: system message, formatting and so on
     prompt_overhead = 200
     if include_context:
         prompt_overhead += 100  # Statistical context adds tokens
@@ -137,12 +138,12 @@ def get_max_input_steps(
     available_for_prompt = context_limit - output_tokens
     available_for_data = available_for_prompt - prompt_overhead
     
-    # Calculate max input steps with safety margin
+    # Max input steps, with a safety margin
     max_steps = int(available_for_data / tokens_per_value * 0.90)  # 10% safety margin
     
-    return max(48, max_steps)  # At least 48 points (12 hours) minimum
+    return max(48, max_steps)  # Never fewer than 48 points (12 hours)
 
-# Best known config per LLMTime: normalize, no context, temp 0.9, 5 samples
+# Best known config for LLMTime: normalize, no context, temperature 0.9, 5 samples
 BEST_PARAMS = {
     "num_forecasts": 5,
     "temperature": 0.9,
@@ -189,7 +190,7 @@ def compute_crps(samples: List[np.ndarray], truth: np.ndarray) -> float:
     return float(np.mean(crps_per_step))
 
 
-# Computes core evaluation metrics: MAE, RMSE, sMAPE, WBA-10, naive MAE, CRPS.
+# Computes the core metrics: MAE, RMSE, sMAPE, WBA-10, naive MAE and CRPS.
 def compute_metrics(
     forecast: np.ndarray,
     truth: np.ndarray,
@@ -231,7 +232,7 @@ def compute_metrics(
     }
 
 
-# Computes a quality score based on forecast characteristics and input data range.
+# Computes a quality score from the forecast's characteristics and the range of the input data.
 def compute_quality_score(forecast: np.ndarray, input_series: pd.Series) -> Dict[str, Any]:
     vals = input_series.values
     in_min, in_max = float(vals.min()), float(vals.max())
@@ -285,7 +286,7 @@ def run_one_test(
     win = WINDOWS[window_key]
     horizon = max(1, (ds["horizon_hours"] * 60) // win["interval_min"])
 
-    # Calculate max input steps based on model context limit
+    # Max input steps that fit in the model's context limit
     include_context = param_config.get("include_context", False)
     use_normalization = param_config.get("use_normalization", True)
     max_steps = get_max_input_steps(
@@ -296,7 +297,7 @@ def run_one_test(
         use_normalization=use_normalization,
     )
     
-    # Truncate requested steps if they exceed context limit
+    # Cut the requested steps if they exceed the context limit
     requested_steps = win["steps"]
     actual_steps = requested_steps
     truncated = False
@@ -549,7 +550,7 @@ def print_summary(results: List[Dict]) -> None:
 
     for key in sorted(groups.keys()):
         items = groups[key]
-        r = items[0]  # Each combination should have one result now
+        r = items[0]  # Each combination has one result
         m = r["metrics"]
         vs_s = f"{m['mae_vs_naive']:+.1f}" if m.get("mae_vs_naive") is not None else "N/A"
         config_short = key[2][:26] + ".." if len(key[2]) > 28 else key[2]
@@ -617,13 +618,13 @@ def main() -> None:
         sensors = ["temperature"]
         windows = ["1-day"]
 
-    # Check which windows will be truncated due to context limits
+    # Warn about windows that will be cut by the context limit
     for w in windows:
         max_steps = get_max_input_steps(args.provider, args.model)
         if max_steps is not None and WINDOWS[w]["steps"] > max_steps:
             print(f"NOTE: {w} window ({WINDOWS[w]['steps']} steps) will be truncated to {max_steps} steps for this model")
 
-    # Build test plan (no repeats — variance comes from multiple forecasts per call)
+    # Build the test plan. There are no repeats, because the variance comes from several forecasts per call.
     plan: List[Tuple[str, str, Dict]] = []
 
     if args.mode == "window":
@@ -633,7 +634,7 @@ def main() -> None:
                 plan.append((sensor, window, {**BEST_PARAMS, "_name": "best-params"}))
 
     elif args.mode == "ablation":
-        # Ablation study: each config tested across all window sizes
+        # Ablation study: every config is tested on all window sizes
         for sensor in sensors:
             for window in windows:
                 for cfg in ABLATION_CONFIGS:

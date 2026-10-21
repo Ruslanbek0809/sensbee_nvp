@@ -1,7 +1,10 @@
-# Tests for benchmark/tasks.py on synthetic rows (no snapshot, no network): the fill rule of each sensor kind, equality
-# with the service loader (only SensbeeClient.get_sensor_data is patched, with autospec), origins and periods, the
-# validity reasons, the scale's exclusions, that nothing at or after an origin reaches its context or scale, and the
-# training items of fitted models (gap splits, minimum length, train_start, exclusions).
+# Tests for benchmark/tasks.py on synthetic rows (no snapshot, no network):
+# - the fill rule of each sensor kind
+# - equality with the service loader (only SensbeeClient.get_sensor_data is patched, with autospec)
+# - origins and periods, and the validity reasons
+# - the scale's exclusions
+# - nothing at or after an origin reaches its context or scale
+# - the training items of fitted models (gap splits, minimum length, train_start, exclusions)
 
 import dataclasses
 import math
@@ -139,8 +142,8 @@ def test_origin_validity_reasons():
 
 
 # A longer context passed to origin_table is checked like the default ones: a week-long gap 6–7 weeks before the
-# origin leaves every default window complete but the 56-day window only 49/56 observed; 56 days also need more
-# history.
+# origin leaves every default window complete but the 56-day window only 49/56 observed. A 56-day context also needs
+# more history.
 def test_longer_contexts_are_checked_only_when_passed():
     times = pd.date_range("2026-01-01", "2026-03-02", freq="15min", inclusive="left")
     keep = ~((times >= "2026-01-05") & (times < "2026-01-12"))
@@ -159,7 +162,7 @@ def test_longer_contexts_are_checked_only_when_passed():
 
 
 def test_scale_ignores_excluded_buckets():
-    # A counter rising by 1 per bucket has |y_t - y_{t-96}| = 96 everywhere; zeros from an outage inflate the scale
+    # A counter rising by 1 per bucket has |y_t - y_{t-96}| = 96 everywhere. Zeros from an outage inflate the scale
     # unless the outage is excluded.
     times = pd.date_range("2026-01-01", "2026-02-01", freq="15min", inclusive="left")
     values = np.arange(len(times), dtype=float)

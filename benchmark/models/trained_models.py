@@ -1,47 +1,68 @@
 # Trained forecasters for the benchmark harness (Phase 3): AutoGluon's global models behind the runner's trainer
-# contract (benchmark/runner.py header). A trainer fits one model per sensor on the training items before the period
-# and returns a forecaster that predicts every harness context as a new series with that frozen model.
+# contract (benchmark/runner.py header).
+# A trainer fits one model per sensor on the training items before the period.
+# It returns a forecaster that predicts every harness context as a new series with that frozen model.
 #
 # Values only: no date or time features, no covariates, no static features, so a trained model sees what the other
 # models see. Every default that matters is set explicitly and recorded (AutoGluon 1.6.3 source, checked 2026-10-14):
-# - lags: AutoGluon's own 15-min set capped at 672 (one week), so a model's input window fits the 14-day context;
-# - date_features=[] (the default adds minute, hour, weekday, day of month and day of year from UTC timestamps);
-# - eval_metric="SQL" makes DirectTabular train a quantile LightGBM (only quantile metrics do); nothing is selected;
-# - LightGBM: AutoGluon's defaults written out (10,000 rounds, learning rate 0.05, adaptive early stopping on the last
-#   96 rows of each training item, which the tabular models hold out themselves) plus the harness seed;
+# - lags: AutoGluon's own 15-min set capped at 672 (one week), so a model's input window fits the 14-day context.
+# - date_features=[]. The default adds minute, hour, weekday, day of month and day of year from UTC timestamps.
+# - eval_metric="SQL" makes DirectTabular train a quantile LightGBM (only quantile metrics do). Nothing is selected.
+# - LightGBM: AutoGluon's defaults written out, plus the harness seed. The defaults are 10,000 rounds, learning rate
+#   0.05, and adaptive early stopping on the last 96 rows of each training item (the tabular models hold these out
+#   themselves).
 # - max_num_items / max_num_samples = None: no random subsampling of items or rows.
-# DeepAR (GluonTS): time_features=[], no static or known covariates, AutoGluon's defaults for the network and training
-# written out, and context_length = 2 days unrolled plus the same lags (one week back), an input window of 863 steps.
-# PatchTST (GluonTS): no covariates, AutoGluon's and GluonTS's defaults written out, and a context_length of one week
-# (672 steps, 84 patches of 16 with stride 8); it has no lags and no time features.
-# Without validation data AutoGluon gives GluonTS models no early stopping, so DeepAR and PatchTST stop on the final
-# TUNING_DAYS before the cutoff: those days are held out of training and validated one day at a time, and GluonTS keeps
-# the epoch with the lowest validation loss. DeepAR's validation loss also scores the context_length - 1 steps before
-# each validated day (DeepARLightningModule.validation_step has no future_only), so its training ends that much earlier
-# as well (DEEPAR_HOLDOUT) and no scored step was trained on; PatchTST's loss scores only the validated day. The epochs
-# run, the best epoch and its loss come from the Lightning logs (keep_lightning_logs) into the fit record. GluonTS
-# drops unknown hyperparameter keys without a word, so the tests check the fitted network itself. DeepAR's built-in
-# log "age" feature (position in the given series) has no switch. GluonTS's default training sampler lets a training
-# window end anywhere after an item's first step and fills the missing past with zeros, which the network can't tell
-# from real zeros (a closed hall, 0 °C) and which no harness context contains (3-9% of the windows on our training
-# items), so training windows start only once an item holds a full input window (min_past = input_steps).
-# Known covariates (Phase 4, tabular models only; benchmark/covariates.py): the trainer gets the known columns before
-# the cutoff, which become extra columns of the training items and AutoGluon's known_covariates_names; each forecast
-# gets its window's context rows as columns and its HORIZON future rows as known_covariates. covariate_scaler and
-# covariate_regressor are None (AutoGluon's tabular default, written out). AutoGluon 1.6.3 also adds, for every known
-# covariate that isn't 0/1, a copy divided by its mean |value| per item (mlforecast.py:293-303, no switch): over the
-# whole training item when fitting; when forecasting, over the context plus the 96 future rows (DirectTabular,
-# mlforecast.py:572) or the 96 future rows alone (RecursiveTabular, :729). So that copy is on another scale in fit and
-# forecast (known values only, no leakage). On the real validation fits the trees hardly use it: 0 % of the LightGBM
-# gain on the halls (one training item, so the copy is collinear with its column), 0.9 % (DirectTabular) and 0.02 %
-# (RecursiveTabular) on Manebach (benchmark_data/spikes/*_phase4_4.2_gates/scaled_copy_importance_output.txt).
-# The opening profile on training rows is fitted on the training span that holds those rows (in-sample), while a
-# forecast's profile only knows the past: a limitation (owner, 2026-10-15).
-# The tabular target scaler is fitted per series on whatever it is given: the whole training item when fitting, the
-# 14- or 28-day context when forecasting. Training items get ids ("train000000", ...) that no context id ("000000",
-# ...) can match, so every context is a series unseen in fit. RecursiveTabular's quantiles are then Gaussian around its
-# forecast with a spread taken from the context's seasonal error, not from the model, so it is scored as a point
-# forecaster (decision D3-5).
+# DeepAR (GluonTS):
+# - time_features=[], no static or known covariates, AutoGluon's defaults for the network and training written out;
+# - context_length = 2 days unrolled, plus the same lags (one week back), so the input window is 863 steps.
+# PatchTST (GluonTS):
+# - no covariates, AutoGluon's and GluonTS's defaults written out;
+# - context_length of one week (672 steps, 84 patches of 16 with stride 8);
+# - no lags and no time features.
+#
+# Early stopping for DeepAR and PatchTST:
+# - Without validation data AutoGluon gives GluonTS models no early stopping.
+# - So DeepAR and PatchTST stop on the final TUNING_DAYS before the cutoff.
+#   Those days are held out of training and validated one day at a time.
+#   GluonTS keeps the epoch with the lowest validation loss.
+# - DeepAR's validation loss also scores the context_length - 1 steps before each validated day
+#   (DeepARLightningModule.validation_step has no future_only).
+#   So its training ends that much earlier as well (DEEPAR_HOLDOUT), and no scored step was trained on.
+# - PatchTST's loss scores only the validated day.
+# - The epochs run, the best epoch and its loss go from the Lightning logs (keep_lightning_logs) into the fit record.
+# GluonTS drops unknown hyperparameter keys without a word, so the tests check the fitted network itself.
+# DeepAR's built-in log "age" feature (position in the given series) has no switch.
+# GluonTS's default training sampler lets a training window end anywhere after an item's first step.
+# It fills the missing past with zeros.
+# The network can't tell these from real zeros (a closed hall, 0 °C), and no harness context contains them
+# (3-9% of the windows on our training items).
+# So training windows start only once an item holds a full input window (min_past = input_steps).
+#
+# Known covariates (Phase 4, tabular models only; benchmark/covariates.py):
+# - The trainer gets the known columns before the cutoff.
+#   They become extra columns of the training items and AutoGluon's known_covariates_names.
+# - Each forecast gets its window's context rows as columns and its HORIZON future rows as known_covariates.
+# - covariate_scaler and covariate_regressor are None (AutoGluon's tabular default, written out).
+# AutoGluon 1.6.3 also adds a scaled copy of every known covariate that isn't 0/1 (mlforecast.py:293-303, no switch).
+# The copy is divided by the covariate's mean |value| per item.
+# - When fitting, the mean is over the whole training item.
+# - When forecasting, it is over the context plus the 96 future rows (DirectTabular, mlforecast.py:572),
+#   or over the 96 future rows alone (RecursiveTabular, :729).
+# So that copy is on another scale in fit and forecast. It uses known values only, so there is no leakage.
+# On the real validation fits the trees hardly use it:
+# - 0 % of the LightGBM gain on the halls (one training item, so the copy is collinear with its column);
+# - 0.9 % (DirectTabular) and 0.02 % (RecursiveTabular) on Manebach
+#   (benchmark_data/spikes/*_phase4_4.2_gates/scaled_copy_importance_output.txt).
+# The opening profile on training rows is fitted on the training span that holds those rows (in-sample).
+# A forecast's profile only knows the past. This is a limitation (owner, 2026-10-15).
+#
+# The tabular target scaler is fitted per series on whatever it is given.
+# That is the whole training item when fitting, and the 14- or 28-day context when forecasting.
+# Training items get ids ("train000000", ...) that no context id ("000000", ...) can match.
+# So every context is a series unseen in fit.
+# RecursiveTabular's quantiles are then Gaussian around its forecast, with a spread taken from the context's seasonal
+# error, not from the model.
+# So it is scored as a point forecaster (decision D3-5).
 
 import logging
 import tempfile
@@ -71,8 +92,10 @@ GLUONTS_COMMON = {"disable_static_features": True, "disable_known_covariates": T
                   "predict_batch_size": 500, "keep_lightning_logs": True}
 
 
-# Steps of history a model reads: a tabular model's largest lag plus its differencing, DeepAR's unrolled context plus
-# its largest lag minus one (GluonTS stores lag l as index l - 1), or PatchTST's context.
+# Steps of history a model reads. This is one of:
+# - a tabular model's largest lag plus its differencing;
+# - DeepAR's unrolled context plus its largest lag minus one (GluonTS stores lag l as index l - 1);
+# - PatchTST's context.
 def input_steps(params: dict) -> int:
     if "lags_seq" in params:
         return params["context_length"] + max(params["lags_seq"]) - 1
@@ -81,11 +104,12 @@ def input_steps(params: dict) -> int:
     return params["context_length"]
 
 
-# Splits training items for early stopping on the last `days` days: training then ends `days` days plus `holdout`
-# steps before the end of the last item, and the tuning data holds `days` copies of that item, cut 0, 1, ... days
-# before its end, so the model validates on each of the final days (the last HORIZON steps of each tuning item, plus
-# the `holdout` steps before them that a GluonTS validation loss also scores). Raises when the shortened item can't hold
-# one full input window plus a horizon.
+# Splits training items for early stopping on the last `days` days.
+# Training then ends `days` days plus `holdout` steps before the end of the last item.
+# The tuning data holds `days` copies of that item, cut 0, 1, ... days before its end.
+# So the model validates on each of the final days: the last HORIZON steps of each tuning item, plus the `holdout`
+# steps before them that a GluonTS validation loss also scores.
+# Raises when the shortened item can't hold one full input window plus a horizon.
 def tuning_split(items: list[pd.Series], days: int, steps: int,
                  holdout: int = 0) -> tuple[list[pd.Series], list[pd.Series]]:
     last = items[-1]
@@ -95,8 +119,9 @@ def tuning_split(items: list[pd.Series], days: int, steps: int,
     return [*items[:-1], last.iloc[:keep]], [last.iloc[: len(last) - k * BUCKETS_PER_DAY] for k in range(days)]
 
 
-# Epochs run, the best epoch (1-based, from the best checkpoint's file name) and its validation loss, read from the
-# Lightning logs a GluonTS model keeps with keep_lightning_logs. Raises when no validation loss was logged.
+# Reads three numbers from the Lightning logs a GluonTS model keeps with keep_lightning_logs:
+# the epochs run, the best epoch (1-based, from the best checkpoint's file name) and its validation loss.
+# Raises when no validation loss was logged.
 def _lightning_epochs(folder: Path) -> dict:
     from tensorboard.backend.event_processing.event_accumulator import EventAccumulator
     (version,) = folder.glob("**/lightning_logs/version_*")
@@ -111,12 +136,16 @@ def _lightning_epochs(folder: Path) -> dict:
 
 
 # Builds a trainer for one AutoGluon global model (its hyperparameter key, e.g. "DirectTabular") and returns it with
-# the hyperparameters recorded in run.json. point_only: every quantile is the model's own forecast ("mean");
-# tuning_days > 0: early stopping on the final days before the cutoff (tuning_split), with `holdout` steps before them
-# that the model's validation loss also scores. A tabular model gets the harness seed in its LightGBM
-# hyperparameters; every model gets it as AutoGluon's fit and predict seed. A GluonTS model (one with a
-# context_length) samples training windows only where a full input window exists (min_past). The fitted model is
-# not persisted in memory: AutoGluon reloads it per prediction, and persisting it changes DeepAR's sampled forecasts.
+# the hyperparameters recorded in run.json.
+# - point_only: every quantile is the model's own forecast ("mean").
+# - tuning_days > 0: early stopping on the final days before the cutoff (tuning_split), with `holdout` steps before
+#   them that the model's validation loss also scores.
+# A tabular model gets the harness seed in its LightGBM hyperparameters.
+# Every model gets it as AutoGluon's fit and predict seed.
+# A GluonTS model (one with a context_length) samples training windows only where a full input window exists
+# (min_past).
+# The fitted model is not persisted in memory. AutoGluon reloads it per prediction, and persisting it changes
+# DeepAR's sampled forecasts.
 def autogluon_trainer(model: str, params: dict, point_only: bool = False, tuning_days: int = 0, holdout: int = 0):
     hyperparameters = dict(params)
     steps = input_steps(params)

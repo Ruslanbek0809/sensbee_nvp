@@ -1,15 +1,18 @@
 # TimesFM 2.5 (timesfm 3.0.2, TimesFM_2p5_200M_torch) as a zero-shot harness forecaster (contract:
 # benchmark/runner.py header).
 #
-# The model is loaded once per build at a pinned Hugging Face revision, without torch.compile (CPU). Every call is
-# compiled for its own context length rounded up to the 32-step patch, so the harness's equal-length contexts are
-# never padded; context + the 128-step output block must stay within 16,384 steps, i.e. at most 16,256 context steps
-# (169.3 days at 15 min). Settings are the model card's, except two:
-#   - infer_is_positive=False: the default True clamps every output at 0 when the whole context is >= 0, which would
-#     clip visitor-count forecasts (timesfm_2p5_torch.py, v3.0.2); clipping is never part of the main tables;
-#   - fix_quantile_crossing=False: the runner counts and sorts crossing quantiles the same way for every model.
-# The output holds the mean and then the 0.1..0.9 quantiles; the 9 deciles are read out directly. Series are
-# forecast independently (no covariates, no cross-series terms), and the model is deterministic, so the seed is unused.
+# The model is loaded once per build at a pinned Hugging Face revision, without torch.compile (CPU).
+# Every call is compiled for its own context length rounded up to the 32-step patch.
+# So the harness's equal-length contexts are never padded.
+# Context + the 128-step output block must stay within 16,384 steps, i.e. at most 16,256 context steps
+# (169.3 days at 15 min).
+# Settings are the model card's, except two:
+#   - infer_is_positive=False. The default True clamps every output at 0 when the whole context is >= 0, which would
+#     clip visitor-count forecasts (timesfm_2p5_torch.py, v3.0.2). Clipping is never part of the main tables.
+#   - fix_quantile_crossing=False. The runner counts and sorts crossing quantiles the same way for every model.
+# The output holds the mean and then the 0.1..0.9 quantiles. The 9 deciles are read out directly.
+# Series are forecast independently (no covariates, no cross-series terms).
+# The model is deterministic, so the seed is unused.
 
 import logging
 import math

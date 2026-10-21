@@ -1,8 +1,9 @@
 #!/usr/bin/env python3
 # Read-only audit of the SensBee sensors this project can reach: history length, gaps, storage type, timestamp timezone.
 #
-# Sensors come from .env pairs (<NAME>_SENSOR_UUID + optional <NAME>_MY_API_KEY_READ). With --public, every sensor in
-# the public GET /api/sensors/list is audited too. API keys are read from the environment and never printed or saved.
+# Sensors come from .env pairs (<NAME>_SENSOR_UUID and an optional <NAME>_MY_API_KEY_READ).
+# With --public, every sensor in the public GET /api/sensors/list is audited too.
+# API keys are read from the environment. They are never printed or saved.
 #
 # Usage (from sensbee_nvp/):
 #   venv/bin/python scripts/audit_sensors.py                          # Markdown report to stdout
@@ -28,7 +29,7 @@ TIME_FORMAT = "%Y-%m-%dT%H:%M:%S"
 DAY_SECONDS = 86400
 
 
-# Collects (name, sensor_id, read_key) triples from <NAME>_SENSOR_UUID / <NAME>_MY_API_KEY_READ env pairs.
+# Collects (name, sensor_id, read_key) triples from the <NAME>_SENSOR_UUID and <NAME>_MY_API_KEY_READ env pairs.
 def sensors_from_env() -> list[dict[str, Optional[str]]]:
     sensors = []
     for var, value in sorted(os.environ.items()):
@@ -39,7 +40,7 @@ def sensors_from_env() -> list[dict[str, Optional[str]]]:
     return sensors
 
 
-# Calls a SensBee GET endpoint and returns (status_code, parsed_json_or_None). Never raises on HTTP errors.
+# Calls a SensBee GET endpoint and returns (status_code, parsed_json_or_None). HTTP errors do not raise.
 def api_get(client: httpx.Client, path: str, params: dict[str, Any]) -> tuple[int, Any]:
     try:
         resp = client.get(path, params=params)
@@ -89,11 +90,12 @@ def audit_sensor(client: httpx.Client, sensor: dict[str, Optional[str]]) -> dict
     report["first"], report["last"] = t_first.strftime(TIME_FORMAT), t_last.strftime(TIME_FORMAT)
     report["span_days"] = round((t_last - t_first).total_seconds() / DAY_SECONDS, 1)
 
-    # Minutes between "now" and the newest row, if SensBee timestamps were UTC. About -120 would mean local time (CEST).
+    # Age of the newest row in minutes, assuming SensBee timestamps are UTC.
+    # A value near -120 would mean the timestamps are local time (CEST).
     now_utc = datetime.now(timezone.utc).replace(tzinfo=None)
     report["newest_row_age_min_if_utc"] = round((now_utc - t_last).total_seconds() / 60, 1)
 
-    # Daily COUNT buckets over the whole history (buckets without rows are not returned by the API).
+    # Daily COUNT buckets over the whole history. The API does not return buckets without rows.
     count_col = next((c for c in report["columns"] if isinstance(first_row.get(c), (int, float))), None)
     if count_col is None:
         return report

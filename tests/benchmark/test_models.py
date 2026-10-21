@@ -1,7 +1,10 @@
-# Tests for the baseline forecasters in benchmark/models on short synthetic series: output shape, finite values, batch
-# independence (an origin forecast alone equals the same origin inside a batch), Theta as a point forecaster, ETS
-# without the season and without AutoGluon's silent fallback, and exact seasonal naive on a periodic series. Run only
-# where AutoGluon and statsforecast are installed (the bench venv).
+# Tests for the baseline forecasters in benchmark/models on short synthetic series:
+# - output shape and finite values
+# - batch independence (an origin forecast alone equals the same origin inside a batch)
+# - Theta as a point forecaster
+# - ETS without the season and without AutoGluon's silent fallback
+# - exact seasonal naive on a periodic series
+# Run only where AutoGluon and statsforecast are installed (the bench venv).
 
 import numpy as np
 import pytest

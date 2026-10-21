@@ -1,31 +1,36 @@
 # Covariates for the benchmark harness (Phase 4): named covariate sets, the covariate frame of a sensor on its 15-min
 # grid, and the window one forecast may see. Every column has a kind:
 # - "known": known before the origin for the whole horizon (calendar, holidays, solar elevation, and the opening
-#   profile learned from the data before the cutoff);
-# - "past": observed values (other weather variables, other stations), visible only before the origin;
+#   profile learned from the data before the cutoff).
+# - "past": observed values (other weather variables, other stations), visible only before the origin.
 # - "oracle": observed future values, an upper bound only (reported apart from the other models).
-# covariate_window() is the one place that decides what a forecast sees: the frame is cut at the origin before it is
-# forward-filled (the context rule of benchmark/tasks.py), and the future rows of "past" columns are blanked. Only an
-# oracle set has oracle columns, whose future rows keep the observed values (gaps stay NaN).
+# covariate_window() is the one place that decides what a forecast sees.
+# - The frame is cut at the origin before it is forward-filled (the context rule of benchmark/tasks.py).
+# - The future rows of "past" columns are blanked.
+# - Only an oracle set has oracle columns. Their future rows keep the observed values (gaps stay NaN).
 #
-# Calendar features use Europe/Berlin time (SensBee timestamps are naive UTC). Holidays come from a dated table that
-# covers HOLIDAYS_FROM to HOLIDAYS_TO; calendar frames are built only inside that range, and a window that needs a row
-# outside it raises instead of getting a silent 0.
+# Calendar features use Europe/Berlin time (SensBee timestamps are naive UTC).
+# Holidays come from a dated table that covers HOLIDAYS_FROM to HOLIDAYS_TO.
+# Calendar frames are built only inside that range. A window that needs a row outside it raises instead of getting a
+# silent 0.
 # - Public holidays: Thüringer Feier- und Gedenktagsgesetz (ThürFGtG) § 2(1), statewide: New Year, Good Friday, Easter
 #   Monday, 1 May, Ascension, Whit Monday, 20 September (Weltkindertag), 3 October, Reformation Day (31 October),
-#   Christmas Day and 26 December (umwelt-online.de, last amendment 26.03.2019, checked 2026-10-14). Corpus Christi
-#   is a holiday only where an ordinance names a mainly Catholic municipality (§ 2(2)), not Ilmenau, so it is left out.
+#   Christmas Day and 26 December (umwelt-online.de, last amendment 26.03.2019, checked 2026-10-14).
+#   Corpus Christi is left out. It is a holiday only where an ordinance names a mainly Catholic municipality
+#   (§ 2(2)), and Ilmenau is not one.
 #   Easter 2026 is 5 April (tests/benchmark/test_covariates.py computes it).
 # - School holidays: KMK "Ferien im Schuljahr 2025/2026", Thüringen row, Stand 09.10.2025
-#   (kmk.org/fileadmin/Dateien/pdf/Ferienkalender/FER2025_26.pdf, checked 2026-10-14): first and last holiday day;
-#   15.05.2026 is a school-free day.
+#   (kmk.org/fileadmin/Dateien/pdf/Ferienkalender/FER2025_26.pdf, checked 2026-10-14).
+#   The table gives the first and last holiday day. 15.05.2026 is a school-free day.
 # Solar elevation: NOAA Global Monitoring Division, "General Solar Position Calculations" (gml.noaa.gov/grad/solcalc/
-# solareqns.PDF, checked 2026-10-14), at one point for Ilmenau (de.wikipedia.org/wiki/Ilmenau: 50.687 N, 10.914 E,
-# checked 2026-10-14); the weather stations lie within about 10 km, which moves the sun angle by a fraction of a degree.
-# The opening profile (D4-1): per Berlin weekday and 15-min local slot, the share of days with visitors_total > 0 in the
-# hall's training data before the cutoff (from task.train_start, without the task's exclusions), fitted once per sensor
-# and period like a trained model. series_open_profile() computes the same share from any series; Phase 5 uses it on
-# each 28-day context, the profile the service can compute without knowing when a season starts (D5-2).
+# solareqns.PDF, checked 2026-10-14). It is computed at one point for Ilmenau (de.wikipedia.org/wiki/Ilmenau:
+# 50.687 N, 10.914 E, checked 2026-10-14). The weather stations lie within about 10 km, which moves the sun angle by
+# a fraction of a degree.
+# The opening profile (D4-1): per Berlin weekday and 15-min local slot, the share of days with visitors_total > 0.
+# It is taken from the hall's training data before the cutoff (from task.train_start, without the task's exclusions).
+# It is fitted once per sensor and period, like a trained model.
+# series_open_profile() computes the same share from any series. Phase 5 uses it on each 28-day context, because the
+# service can compute that profile without knowing when a season starts (D5-2).
 
 import logging
 from dataclasses import dataclass
@@ -95,8 +100,8 @@ def _time_of_day(local: pd.DatetimeIndex) -> tuple[np.ndarray, np.ndarray]:
     return np.sin(tod), np.cos(tod)
 
 
-# Calendar features in Berlin time: time of day and weekday as sin/cos, and the public and school holiday flags of the
-# local date. Raises when a timestamp's local date lies outside the holiday table.
+# Calendar features in Berlin time: time of day and weekday as sin/cos, plus the public and school holiday flags
+# of the local date. Raises when a timestamp's local date lies outside the holiday table.
 def calendar(index: pd.DatetimeIndex) -> pd.DataFrame:
     local = berlin(index)
     days = local.tz_localize(None).normalize()
@@ -136,8 +141,8 @@ def _local_slots(index: pd.DatetimeIndex) -> tuple[np.ndarray, np.ndarray]:
     return local.weekday.to_numpy(), (local.hour * 4 + local.minute // 15).to_numpy()
 
 
-# Opening profile of a series: [7 weekdays, 96 slots] share of its days with a value > 0 in that Berlin weekday and
-# 15-min slot; slots the series doesn't cover are NaN.
+# Opening profile of a series, shape [7 weekdays, 96 slots]: the share of its days with a value > 0 in that Berlin
+# weekday and 15-min slot. Slots the series doesn't cover are NaN.
 def series_open_profile(series: pd.Series) -> np.ndarray:
     weekday, slot = _local_slots(series.index)
     share = (series.to_numpy() > 0).astype(float)
@@ -145,8 +150,8 @@ def series_open_profile(series: pd.Series) -> np.ndarray:
     return profile.reindex(pd.MultiIndex.from_product([range(7), range(96)])).to_numpy().reshape(7, 96)
 
 
-# Opening profile of a hall: [7 weekdays, 96 slots] share of days with visitors > 0 in the training data before the
-# cutoff (from task.train_start, without the task's exclusions).
+# Opening profile of a hall, shape [7 weekdays, 96 slots]: the share of days with visitors > 0 in the training data
+# before the cutoff (from task.train_start, without the task's exclusions).
 def open_profile(series: pd.Series, task: SensorTask, cutoff: pd.Timestamp) -> np.ndarray:
     history = training_history(series, task, cutoff)
     return series_open_profile(history[~_excluded(history.index, task)])
@@ -158,10 +163,10 @@ def open_share(index: pd.DatetimeIndex, profile: np.ndarray) -> np.ndarray:
     return profile[weekday, slot]
 
 
-# The covariate frame of one sensor for a set: every column on the sensor's grid (calendar sets only inside the
-# holiday table), its kind, and info for run.json (the opening profile). cutoff: the period start, where the opening
-# profile is fitted. Weather columns are SensBee AVG buckets, unfilled. The runner checks that the set is of the
-# sensor's task kind.
+# The covariate frame of one sensor for a set. It returns every column on the sensor's grid (calendar sets only
+# inside the holiday table), the kind of each column, and info for run.json (the opening profile).
+# cutoff: the period start, where the opening profile is fitted.
+# Weather columns are SensBee AVG buckets, unfilled. The runner checks that the set matches the sensor's task kind.
 def build(name: str, sensor: str, frames: dict[str, pd.DataFrame], series: pd.Series, task: SensorTask,
           cutoff: pd.Timestamp) -> tuple[pd.DataFrame, dict[str, str], dict]:
     spec = COVARIATE_SETS[name]
@@ -198,11 +203,12 @@ def build(name: str, sensor: str, frames: dict[str, pd.DataFrame], series: pd.Se
     return pd.DataFrame(columns, index=index), kinds, info
 
 
-# What one forecast may see: rows for the context's timestamps (the frame cut at the origin, then forward-filled, as
-# contexts are) and the HORIZON steps from the origin on, with the future of "past" columns blanked. The window's
-# attrs["future_columns"] lists the known and oracle columns, so a model gets the same input schema for every window
-# of a set (an oracle column whose future is all NaN in one window stays a future column). Raises when a known column
-# has a missing value (e.g. outside the holiday table).
+# What one forecast may see: rows for the context's timestamps (the frame cut at the origin, then forward-filled,
+# as contexts are) and the HORIZON steps from the origin on, with the future of "past" columns blanked.
+# The window's attrs["future_columns"] lists the known and oracle columns.
+# So a model gets the same input schema for every window of a set
+# (an oracle column whose future is all NaN in one window stays a future column).
+# Raises when a known column has a missing value (e.g. outside the holiday table).
 def covariate_window(frame: pd.DataFrame, kinds: dict[str, str], origin: pd.Timestamp,
                      context_index: pd.DatetimeIndex) -> pd.DataFrame:
     past = frame.loc[: origin - STEP].ffill().reindex(context_index)

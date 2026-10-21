@@ -1,12 +1,14 @@
 # AutoGluon's local models (Naive, SeasonalNaive, AutoETS, AutoARIMA, Theta) as harness forecasters
 # (contract: benchmark/runner.py header).
 #
-# Local models fit inside predict(), one fit per series, so every context of a batch is forecast on its own: fit() only
-# stores the settings plus a marginal "dummy" forecast that AutoGluon uses for all-NaN series, which valid contexts
-# never are (autogluon/timeseries/models/local/abstract_local_model.py, v1.6.3). Every default that matters is set
-# explicitly: max_ts_length=None (the harness cuts the context), use_fallback_model=False
-# (an error surfaces and the runner marks the origin failed instead of AutoGluon silently swapping in SeasonalNaive),
-# and n_jobs = the physical cores.
+# Local models fit inside predict(), one fit per series, so every context of a batch is forecast on its own.
+# fit() only stores the settings plus a marginal "dummy" forecast that AutoGluon uses for all-NaN series.
+# Valid contexts are never all-NaN (autogluon/timeseries/models/local/abstract_local_model.py, v1.6.3).
+# Every default that matters is set explicitly:
+# - max_ts_length=None, because the harness cuts the context;
+# - use_fallback_model=False, so an error surfaces and the runner marks the origin failed, instead of AutoGluon
+#   silently swapping in SeasonalNaive;
+# - n_jobs = the physical cores.
 
 import logging
 import tempfile
@@ -29,8 +31,8 @@ def physical_cores() -> int:
     return joblib.cpu_count(only_physical_cores=True)
 
 
-# One TimeSeriesDataFrame with one item per context; item ids ("<prefix>000000", ...) keep the batch order. covariates:
-# one frame per context whose rows at the context's timestamps become extra columns (known covariates).
+# One TimeSeriesDataFrame with one item per context. The item ids ("<prefix>000000", ...) keep the batch order.
+# covariates: one frame per context. Its rows at the context's timestamps become extra columns (known covariates).
 def _batch_frame(contexts: list[pd.Series], prefix: str = "", covariates: Optional[list[pd.DataFrame]] = None):
     from autogluon.timeseries import TimeSeriesDataFrame
     frames = [pd.DataFrame({"item_id": f"{prefix}{i:06d}", "timestamp": c.index, "target": c.to_numpy(dtype=float)})
@@ -41,16 +43,17 @@ def _batch_frame(contexts: list[pd.Series], prefix: str = "", covariates: Option
     return TimeSeriesDataFrame.from_data_frame(pd.concat(frames, ignore_index=True))
 
 
-# Reads AutoGluon predictions for the items _batch_frame numbered 0..n-1 into [n, horizon, levels]: the model's own
-# quantiles, or its point forecast ("mean") in every column when point_only.
+# Reads AutoGluon predictions for the items _batch_frame numbered 0..n-1 into [n, horizon, levels].
+# It takes the model's own quantiles, or its point forecast ("mean") in every column when point_only.
 def _quantiles(predictions: pd.DataFrame, n: int, levels: tuple[float, ...], point_only: bool) -> np.ndarray:
     columns = ["mean"] * len(levels) if point_only else [str(level) for level in levels]
     return np.stack([predictions.loc[f"{i:06d}", columns].to_numpy(dtype=float) for i in range(n)])
 
 
 # Builds a forecaster for one AutoGluon local model (its hyperparameter key, e.g. "AutoETS") and returns it with the
-# effective hyperparameters. point_only: every quantile is the model's own forecast ("mean"), for models whose
-# quantiles are not their forecast distribution (Theta: 200 simulated paths, decision D-B4).
+# effective hyperparameters.
+# point_only: every quantile is the model's own forecast ("mean"). This is for models whose quantiles are not their
+# forecast distribution (Theta: 200 simulated paths, decision D-B4).
 def autogluon_forecaster(model: str, params: dict, point_only: bool = False):
     hyperparameters = {**AG_COMMON, **params, "n_jobs": physical_cores()}
 

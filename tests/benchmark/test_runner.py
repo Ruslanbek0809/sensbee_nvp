@@ -1,7 +1,10 @@
-# Tests for benchmark/runner.py on a tiny synthetic snapshot written to tmp_path (no network): the files and the
-# provenance of a run, the check forecasters, determinism by seed, no overwriting, that failed origins, fallbacks
-# and crossed quantiles are counted instead of dropped or hidden, the trainer hook of fitted models (once per sensor,
-# only data before the period, a failed fit fails the sensor), the origin stride and a forecaster's diagnostics.
+# Tests for benchmark/runner.py on a tiny synthetic snapshot written to tmp_path (no network):
+# - the files and the provenance of a run
+# - the check forecasters
+# - determinism by seed, and no overwriting
+# - failed origins, fallbacks and crossed quantiles are counted instead of dropped or hidden
+# - the trainer hook of fitted models (once per sensor, only data before the period, a failed fit fails the sensor)
+# - the origin stride and a forecaster's diagnostics
 
 import json
 from pathlib import Path

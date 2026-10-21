@@ -1,17 +1,27 @@
 #!/usr/bin/env python3
-# Runs the benchmark harness on a frozen snapshot. --dry-run lists the forecast origins per sensor (valid, and why the
-# others are not) and writes nothing; with --contexts, the validity rule also covers those context lengths, as in a
-# run. Otherwise one forecaster runs over the tasks and writes raw forecasts, metrics and a run manifest to a new
-# folder under --out, then the mean metrics per sensor, context and horizon are printed: an in-house check forecaster
-# (naive / seasonal naive; harness checks, not thesis baselines) or a baseline from benchmark/models (AutoGluon /
-# statsforecast; needs the bench venv), or a zero-shot foundation model (Chronos-2, Chronos-Bolt, TimesFM 2.5, TiRex,
-# Toto; bench venv plus their downloaded weights; Moirai-2 in venv-moirai), a trained model (fitted per sensor on
-# the data before the period; bench venv), or LLMTime with a local LLM (bench venv plus its weights). A model runs on its own allowed context lengths unless --contexts picks
-# some of them; --origin-stride k evaluates every k-th valid origin. No network; reads only the snapshot (set
-# HF_HUB_OFFLINE=1 so model weights come only from the local cache). --covariates <set> (benchmark/covariates.py) runs
-# a model that accepts the set's covariate kinds on sensors of the set's kind; the run's model name becomes
-# "<model>+<set>". A "0 when closed" model (MASKED) needs --mask-threshold and a set with the opening profile
-# (cal_open); its run is named "<model>_t<threshold>+<set>".
+# Runs the benchmark harness on a frozen snapshot.
+#
+# --dry-run lists the forecast origins per sensor (valid, and why the others are not) and writes nothing.
+# With --contexts, the validity rule also covers those context lengths, as in a run.
+#
+# Without --dry-run, one forecaster runs over the tasks. It writes raw forecasts, metrics and a run manifest to a new
+# folder under --out. Then it prints the mean metrics per sensor, context and horizon. The forecaster is one of:
+# - an in-house check forecaster (naive / seasonal naive). These are harness checks, not thesis baselines.
+# - a baseline from benchmark/models (AutoGluon / statsforecast). Needs the bench venv.
+# - a zero-shot foundation model (Chronos-2, Chronos-Bolt, TimesFM 2.5, TiRex, Toto). Needs the bench venv and the
+#   downloaded weights. Moirai-2 runs in venv-moirai.
+# - a trained model, fitted per sensor on the data before the period. Needs the bench venv.
+# - LLMTime with a local LLM. Needs the bench venv and the weights.
+#
+# A model runs on its own allowed context lengths unless --contexts picks some of them.
+# --origin-stride k evaluates every k-th valid origin.
+# There is no network access. The run reads only the snapshot. Set HF_HUB_OFFLINE=1 so model weights come only from
+# the local cache.
+#
+# --covariates <set> (benchmark/covariates.py) runs a model that accepts the set's covariate kinds, on sensors of the
+# set's kind. The run's model name becomes "<model>+<set>".
+# A "0 when closed" model (MASKED) needs --mask-threshold and a set with the opening profile (cal_open).
+# Its run is named "<model>_t<threshold>+<set>".
 #
 # Usage (from sensbee_nvp/):
 #   venv/bin/python scripts/run_harness.py --snapshot ../../benchmark_data/snapshots/sensbee-2026-10-01 --dry-run
@@ -49,9 +59,12 @@ from benchmark.tasks import CONTEXT_DAYS, TASKS, origin_table, target_series, va
 INVALID_REASONS = ("excluded", "short_history", "target_gap", "recent_gap", "low_coverage")
 
 
-# One row per sensor: candidate origins of the period, how many are valid, the count per reason for the others, the
-# lowest 7-day context coverage among the valid ones (and of the longest checked context), and how many valid origins
-# have an exclusion inside their context. context_days: context lengths checked on top of CONTEXT_DAYS, as in a run.
+# One row per sensor:
+# - the candidate origins of the period, and how many are valid;
+# - the count per reason for the invalid ones;
+# - the lowest 7-day context coverage among the valid origins (and of the longest checked context);
+# - how many valid origins have an exclusion inside their context.
+# context_days: context lengths checked on top of CONTEXT_DAYS, as in a run.
 def dry_run(snapshot_dir: Path, sensors: list[str], period: str,
             context_days: tuple[Optional[int], ...] = ()) -> pd.DataFrame:
     frames = load_snapshot(snapshot_dir)
@@ -73,8 +86,8 @@ def dry_run(snapshot_dir: Path, sensors: list[str], period: str,
     return pd.DataFrame(rows)
 
 
-# Mean metrics per sensor, context and horizon over the origins that didn't fail, with the origin counts. Every cell is
-# shown, also one where all origins failed. Contexts keep the order of the run.
+# Mean metrics per sensor, context and horizon over the origins that did not fail, with the origin counts.
+# Every cell is shown, including one where all origins failed. Contexts keep the order of the run.
 def summarize(run_dir: Path) -> pd.DataFrame:
     metrics = pd.read_csv(run_dir / "metrics.csv")
     metrics["context"] = pd.Categorical(metrics["context"], categories=list(dict.fromkeys(metrics["context"])))

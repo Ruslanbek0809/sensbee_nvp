@@ -1,21 +1,27 @@
 # Moirai-2.0-R-small (uni2ts 2.0.0, Moirai2Forecast) as a zero-shot harness forecaster (contract: benchmark/runner.py
-# header). Runs only in venv-moirai: uni2ts 2.0.0 declares torch<2.5, numpy~=1.26 and scipy~=1.11, none of which
-# install on Python 3.13 / macOS 27, so it is installed with --no-deps on top of the bench stack (torch 2.10, numpy
-# 2.3; requirements-moirai.txt). Every Moirai-2 result is outside the package's declared pins; the versions of the
-# --no-deps packages are recorded with the settings.
+# header). It runs only in venv-moirai.
+# uni2ts 2.0.0 declares torch<2.5, numpy~=1.26 and scipy~=1.11, and none of them install on Python 3.13 / macOS 27.
+# So it is installed with --no-deps on top of the bench stack (torch 2.10, numpy 2.3; requirements-moirai.txt).
+# Every Moirai-2 result is outside the package's declared pins.
+# The versions of the --no-deps packages are recorded with the settings.
 #
 # uni2ts/common/env.py calls load_dotenv() when it is imported, which would read sensbee_nvp's dotenv file (the SensBee
-# keys) into the process; only uni2ts's dataset builders and eval utilities import it, not the Moirai-2 classes used
-# here (checked 2026-10-13; tests/benchmark/test_moirai.py fails if that changes).
+# keys) into the process.
+# Only uni2ts's dataset builders and eval utilities import it, not the Moirai-2 classes used here
+# (checked 2026-10-13; tests/benchmark/test_moirai.py fails if that changes).
 #
-# The model is loaded once per build at a pinned Hugging Face revision with strict weight loading (the mixin's default
-# is strict=False; the checkpoint and the model have the same keys, 11,387,208 parameters; checked 2026-10-13) and put
-# in eval mode (its dropout is 0 anyway). Every call sets the context length to its contexts' length (one length per
-# call, the runner's contract), so predict() never pads them. Moirai-2 forecasts 4 tokens of 16 steps = 64 steps in
-# one pass; steps 65-96 come from the library's recursion, which feeds each of the 9 quantile paths back as context and
-# takes the quantiles of the 81 results (uni2ts/model/moirai2/forecast.py, v2.0.0), like Chronos-Bolt. The 9 trained
-# quantiles are the deciles, read out by level. Series are forecast independently and the model is deterministic, so
-# the seed is unused. Weights: CC-BY-NC-4.0 (non-commercial; accepted by the owner for research, 2026-10-13).
+# The model is loaded once per build at a pinned Hugging Face revision with strict weight loading.
+# (The mixin's default is strict=False. The checkpoint and the model have the same keys, 11,387,208 parameters;
+# checked 2026-10-13.)
+# It is put in eval mode (its dropout is 0 anyway).
+# Every call sets the context length to its contexts' length (one length per call, the runner's contract), so
+# predict() never pads them.
+# Moirai-2 forecasts 4 tokens of 16 steps = 64 steps in one pass.
+# Steps 65-96 come from the library's recursion (uni2ts/model/moirai2/forecast.py, v2.0.0), like Chronos-Bolt.
+# The recursion feeds each of the 9 quantile paths back as context and takes the quantiles of the 81 results.
+# The 9 trained quantiles are the deciles, read out by level.
+# Series are forecast independently and the model is deterministic, so the seed is unused.
+# Weights: CC-BY-NC-4.0 (non-commercial; accepted by the owner for research, 2026-10-13).
 
 import logging
 from importlib.metadata import version

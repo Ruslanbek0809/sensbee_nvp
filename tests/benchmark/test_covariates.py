@@ -1,11 +1,16 @@
-# Tests for benchmark/covariates.py and the runner's covariate path on synthetic data (no network): Berlin time across
-# the DST switch, the holiday table (local dates, Easter-based holidays computed here), solar elevation against the
-# solstice geometry, the opening profile fitted only before the cutoff, the leakage guard of covariate_window (raising
-# every raw value at or after the origin changes nothing a non-oracle forecast sees), and that the runner hands each
-# forecast its own window, through the split by length and the one-by-one retry, and a trainer only known columns
-# before the cutoff; and the "0 when closed" mask (Phase 4 step 4.3): zero exactly where the learned profile is
-# below the threshold, the base forecast untouched elsewhere; and its Phase 5 form (D5-2), whose profile comes from
-# each context: hand-checked shares of 4 Mondays, and a run without any covariate set.
+# Tests for benchmark/covariates.py and the runner's covariate path on synthetic data (no network):
+# - Berlin time across the DST switch
+# - the holiday table (local dates, Easter-based holidays computed here)
+# - solar elevation against the solstice geometry
+# - the opening profile is fitted only before the cutoff
+# - the leakage guard of covariate_window: raising every raw value at or after the origin changes nothing that a
+#   non-oracle forecast sees
+# - the runner hands each forecast its own window, through the split by length and the one-by-one retry
+# - a trainer gets only known columns before the cutoff
+# - the "0 when closed" mask (Phase 4 step 4.3): zero exactly where the learned profile is below the threshold, and
+#   the base forecast untouched elsewhere
+# - its Phase 5 form (D5-2), whose profile comes from each context: hand-checked shares of 4 Mondays, and a run
+#   without any covariate set
 
 import json
 from datetime import date, timedelta
@@ -89,8 +94,9 @@ def test_calendar_refuses_dates_outside_the_holiday_table():
         cov.calendar(pd.DatetimeIndex(["2026-09-30 22:30"]))  # 00:30 CEST on 1 Oct
 
 
-# At solar noon the elevation is 90° − latitude + declination: ±23.44° at the solstices. Ilmenau lies at 10.9° E, so
-# solar noon is about 44 min before 12:00 UTC, give or take the equation of time (under 17 min).
+# At solar noon the elevation is 90° − latitude + declination. The declination is ±23.44° at the solstices.
+# Ilmenau lies at 10.9° E, so solar noon is about 44 min before 12:00 UTC.
+# The equation of time moves that by under 17 min.
 @pytest.mark.parametrize("day, declination", [("2026-06-21", 23.44), ("2025-12-21", -23.44)])
 def test_solar_elevation_at_the_solstices(day, declination):
     index = pd.date_range(day, periods=24 * 60, freq="1min")
@@ -293,7 +299,7 @@ def _sevens():
 
 # 28 days from Monday 5 Jan (4 Mondays). Local 09:00 (08:00 UTC) has visitors on all 4 Mondays, 09:15 on 1 of them
 # (share 0.25), 09:30 on 2 (0.5), nothing else. The horizon starts on Monday 2 Feb at 00:00 UTC, so step 32 is local
-# 09:00. θ 0.3 masks the 0.25 slot, θ 0.2 keeps it; every never-open slot is 0 either way.
+# 09:00. θ 0.3 masks the 0.25 slot and θ 0.2 keeps it. Every never-open slot is 0 either way.
 @pytest.mark.parametrize("threshold, kept", [(0.3, [32, 34]), (0.2, [32, 33, 34])])
 def test_the_recent_mask_takes_its_profile_from_the_context(threshold, kept):
     index = pd.date_range("2026-01-05", periods=28 * 96, freq="15min")

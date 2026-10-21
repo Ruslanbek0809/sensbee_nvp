@@ -1,28 +1,35 @@
-# Runs one forecaster over the benchmark tasks of a frozen snapshot and writes the raw results to a new folder that is
-# never overwritten: forecasts.csv.gz (every valid origin, step and quantile with the true value), metrics.csv (per
-# origin and horizon), origins.csv (every candidate origin with its validity) and run.json (snapshot, tasks, model,
-# seed, code commit, versions, counts).
+# Runs one forecaster over the benchmark tasks of a frozen snapshot.
+# The raw results go to a new folder that is never overwritten:
+# - forecasts.csv.gz: every valid origin, step and quantile with the true value;
+# - metrics.csv: per origin and horizon;
+# - origins.csv: every candidate origin with its validity;
+# - run.json: snapshot, tasks, model, seed, code commit, versions, counts.
 #
-# Forecaster contract: f(contexts, horizon, levels, seed) -> (quantiles [n, horizon, levels], status per origin), with
-# status "ok" or "fallback" (the forecaster reports its own fallbacks). Batch items are independent: a forecast may use
-# only its own context, so no cross-series learning across origins, whose contexts hold earlier origins' targets.
-# All contexts of one call have the same length: the runner splits a batch by length (only "all history" contexts
-# differ), so an adapter never has to pad. An origin is "failed" when the forecaster raises (the runner then retries
-# the origins one by one), returns the wrong shape, or returns NaN or inf. Crossing quantiles are counted, then sorted
-# for every model, so scores don't depend on which adapter sorts.
+# Forecaster contract: f(contexts, horizon, levels, seed) -> (quantiles [n, horizon, levels], status per origin).
+# - The status is "ok" or "fallback". The forecaster reports its own fallbacks.
+# - Batch items are independent. A forecast may use only its own context.
+#   So there is no cross-series learning across origins, whose contexts hold earlier origins' targets.
+# - All contexts of one call have the same length. The runner splits a batch by length (only "all history" contexts
+#   differ), so an adapter never has to pad.
+# - An origin is "failed" when the forecaster raises (the runner then retries the origins one by one), returns the
+#   wrong shape, or returns NaN or inf.
+# - Crossing quantiles are counted, then sorted for every model, so scores don't depend on which adapter sorts.
 #
-# Trained models: instead of a forecaster, run() takes a trainer(sensor, items, seed) -> (forecaster, fit info), called
-# once per sensor with tasks.training_items() before the start of the run's period (the cutoff), so a fitted model
-# never sees data at or after the period start; the forecaster it returns is then used for every origin and context
-# of that sensor (one frozen model per sensor and period). A trainer that raises, or whose fit info isn't plain JSON
-# (numpy scalars are converted), fails all origins of that sensor.
+# Trained models: instead of a forecaster, run() takes a trainer(sensor, items, seed) -> (forecaster, fit info).
+# - It is called once per sensor with tasks.training_items() before the start of the run's period (the cutoff).
+#   So a fitted model never sees data at or after the period start.
+# - The forecaster it returns is used for every origin and context of that sensor (one frozen model per sensor and
+#   period).
+# - A trainer that raises, or whose fit info isn't plain JSON (numpy scalars are converted), fails all origins of that
+#   sensor.
 # origin_stride=k keeps every k-th valid origin per sensor (a fixed subset for expensive models).
-# A forecaster may have a drain_diagnostics() method returning plain counts (e.g. LLMTime's filtered samples) and
-# resetting them: the runner calls it after each sensor and records the result in counts[sensor]["diagnostics"].
+# A forecaster may have a drain_diagnostics() method that returns plain counts (e.g. LLMTime's filtered samples) and
+# resets them. The runner calls it after each sensor and records the result in counts[sensor]["diagnostics"].
 # Covariates (Phase 4): with covariates=<set name> (benchmark/covariates.py), the forecaster is called with
-# covariates=[one DataFrame per context: its timestamps plus the HORIZON steps from the origin], built only by
-# covariates.covariate_window(), which hides the future of past-only columns; a trainer is called with
-# covariates=<the known columns before the cutoff>. Without covariates the calls are unchanged.
+# covariates=[one DataFrame per context: its timestamps plus the HORIZON steps from the origin].
+# These frames are built only by covariates.covariate_window(), which hides the future of past-only columns.
+# A trainer is called with covariates=<the known columns before the cutoff>.
+# Without covariates the calls are unchanged.
 
 import dataclasses
 import json
@@ -64,7 +71,7 @@ def naive_forecaster(contexts: list[pd.Series], horizon: int, levels: tuple[floa
 
 
 # Seasonal-naive check forecaster with season m: the forecast repeats the last m context values, the same for every
-# quantile. Raises when a context is shorter than m (the runner then marks that origin failed).
+# quantile. It raises when a context is shorter than m (the runner then marks that origin failed).
 def seasonal_naive_forecaster(m: int) -> Forecaster:
     def forecast(contexts: list[pd.Series], horizon: int, levels: tuple[float, ...],
                  seed: int) -> tuple[np.ndarray, list[str]]:
@@ -78,8 +85,8 @@ def seasonal_naive_forecaster(m: int) -> Forecaster:
     return forecast
 
 
-# Check forecasters for harness runs (point forecasts, all quantiles equal), not thesis baselines: name → (forecaster,
-# parameters recorded in run.json).
+# Check forecasters for harness runs, not thesis baselines. They give point forecasts (all quantiles equal).
+# Each entry maps a name to (forecaster, parameters recorded in run.json).
 CHECK_FORECASTERS: dict[str, tuple[Forecaster, dict]] = {
     "naive": (naive_forecaster, {}),
     "seasonal_naive_96": (seasonal_naive_forecaster(96), {"season": 96}),
@@ -104,10 +111,13 @@ def _call(forecaster: Forecaster, contexts: list[pd.Series], levels: tuple[float
     return forecaster(contexts, HORIZON, levels, seed, covariates=covariates)
 
 
-# Calls the forecaster on one batch and checks its output. Contexts of different lengths are forecast in one call per
-# length, in their original order within each; covariate windows stay paired with their contexts. On an exception or
-# a malformed batch result it retries the origins one by one, so one bad origin can't fail the whole batch. Returns
-# quantiles [n, HORIZON, levels], NaN for failed origins, and the status per origin ("ok", "fallback" or "failed").
+# Calls the forecaster on one batch and checks its output.
+# Contexts of different lengths are forecast in one call per length, in their original order within each.
+# Covariate windows stay paired with their contexts.
+# On an exception or a malformed batch result it retries the origins one by one, so one bad origin can't fail the
+# whole batch.
+# Returns quantiles [n, HORIZON, levels] (NaN for failed origins) and the status per origin ("ok", "fallback" or
+# "failed").
 def _predict(forecaster: Forecaster, contexts: list[pd.Series], levels: tuple[float, ...], seed: int,
              covariates: Optional[list[pd.DataFrame]] = None) -> tuple[np.ndarray, list[str]]:
     n = len(contexts)
@@ -163,8 +173,8 @@ def _forecast_frame(sensor: str, context: str, origins: list[pd.Timestamp], stat
     })
 
 
-# A trainer's fit info or a forecaster's diagnostics as plain JSON: numpy scalars become Python numbers, anything
-# else that isn't JSON raises.
+# A trainer's fit info or a forecaster's diagnostics as plain JSON. Numpy scalars become Python numbers.
+# Anything else that isn't JSON raises.
 def _plain_json(value: object) -> object:
     def plain(item: object) -> object:
         if isinstance(item, np.generic):
@@ -174,9 +184,10 @@ def _plain_json(value: object) -> object:
 
 
 # Fits one sensor's model with the trainer on the training items before the cutoff (and the known covariates before
-# it, in a covariate run). Returns the forecaster (None when the trainer raised or returned fit info that isn't JSON,
-# checked now rather than when run.json is written after all the forecasts) and the fit record for run.json: cutoff,
-# items, steps, span, fit seconds and the trainer's info.
+# it, in a covariate run). Returns:
+# - the forecaster, or None when the trainer raised or returned fit info that isn't JSON (this is checked now, not
+#   when run.json is written after all the forecasts);
+# - the fit record for run.json: cutoff, items, steps, span, fit seconds and the trainer's info.
 def _fit(trainer: Trainer, sensor: str, series: pd.Series, task: SensorTask, cutoff: pd.Timestamp,
          seed: int, covariates: Optional[pd.DataFrame] = None) -> tuple[Optional[Forecaster], dict]:
     items = training_items(series, task, cutoff)
@@ -196,12 +207,14 @@ def _fit(trainer: Trainer, sensor: str, series: pd.Series, task: SensorTask, cut
     return forecaster, {**record, "fit_s": round(time.perf_counter() - started, 3), **info}
 
 
-# Runs a forecaster (or, for a trained model, a trainer: see the header) over the given tasks (default: all TASKS) for
-# one period and context lengths (days; None = all history before the origin), and writes the results to
-# out_root/<run_id>. run_id defaults to "<UTC start time>_<model>". Origin validity covers CONTEXT_DAYS plus the run's
-# own context lengths, so a longer context is checked too; with the default contexts the origins are the same as
-# before. origin_stride=k evaluates every k-th valid origin. covariates: a covariate set name (see the header); every
-# task must be of the set's kind. Raises FileExistsError if that folder exists. Returns the run folder.
+# Runs a forecaster (or, for a trained model, a trainer: see the header) over the given tasks (default: all TASKS)
+# for one period and context lengths (days; None = all history before the origin).
+# The results go to out_root/<run_id>. run_id defaults to "<UTC start time>_<model>".
+# Origin validity covers CONTEXT_DAYS plus the run's own context lengths, so a longer context is checked too.
+# With the default contexts the origins are the same as before.
+# origin_stride=k evaluates every k-th valid origin.
+# covariates: a covariate set name (see the header). Every task must be of the set's kind.
+# Raises FileExistsError if that folder exists. Returns the run folder.
 def run(forecaster: Optional[Forecaster], model: str, snapshot_dir: Path, out_root: Path,
         tasks: Optional[dict[str, SensorTask]] = None, period: str = "test",
         context_days: tuple[Optional[int], ...] = CONTEXT_DAYS, seed: int = 0, run_id: Optional[str] = None,

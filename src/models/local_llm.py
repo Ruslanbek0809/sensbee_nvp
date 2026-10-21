@@ -1,5 +1,5 @@
-# Local LLM implementation for time series forecasting with token control.
-# Adapted from LLMTime for local Llama/Mistral models.
+# Runs local LLMs for time series forecasting, with control over the tokens they may produce.
+# Adapted from LLMTime for local Llama and Mistral models.
 
 import logging
 import os
@@ -8,12 +8,12 @@ from typing import Dict, List, Optional, Tuple
 
 logger = logging.getLogger(__name__)
 
-# Global cache for loaded models to avoid reloading between requests.
-# Keyed on (model_name, device_str, dtype, revision) so multi-GPU mode caches one instance per GPU.
+# Global cache of loaded models, so they are not reloaded between requests.
+# The key is (model_name, device_str, dtype, revision), so multi-GPU mode caches one instance per GPU.
 _model_cache: Dict[Tuple[str, str, Optional[str], Optional[str]], Tuple] = {}
 
 
-# Configuration for a local LLM model.
+# Settings for one local LLM.
 @dataclass
 class LocalModelConfig:
     model_id: str
@@ -24,9 +24,9 @@ class LocalModelConfig:
     load_in_8bit: bool = False
 
 
-# Pre-defined model configurations for local LLMs.
+# Ready-made settings for the local LLMs.
 LOCAL_MODELS = {
-    # LLaMA-2 models. Requires HuggingFace access token.
+    # LLaMA-2 models. They need a HuggingFace access token.
     "llama2-7b": LocalModelConfig(
         model_id="meta-llama/Llama-2-7b-hf",
         model_type="auto",
@@ -42,9 +42,9 @@ LOCAL_MODELS = {
     "llama2-70b": LocalModelConfig(
         model_id="meta-llama/Llama-2-70b-hf",
         model_type="auto",
-        load_in_4bit=True,  # 70B needs quantization
+        load_in_4bit=True,  # 70B needs quantization to fit
     ),
-    # Mistral models. No special access required.
+    # Mistral models. They need no special access.
     "mistral-7b": LocalModelConfig(
         model_id="mistralai/Mistral-7B-v0.1",
         model_type="auto",
@@ -56,12 +56,12 @@ LOCAL_MODELS = {
 }
 
 
-# Checks GPU availability (CUDA for NVIDIA, MPS for Apple Silicon).
+# Checks whether a GPU is available (CUDA for NVIDIA, MPS for Apple Silicon).
 def check_gpu_availability() -> dict:
     try:
         import torch
         
-        # Check CUDA (NVIDIA GPUs)
+        # CUDA (NVIDIA GPUs)
         if torch.cuda.is_available():
             gpu_count = torch.cuda.device_count()
             total_vram = 0
@@ -86,7 +86,7 @@ def check_gpu_availability() -> dict:
                 "devices": devices,
             }
         
-        # Check MPS (Apple Silicon)
+        # MPS (Apple Silicon)
         elif hasattr(torch.backends, 'mps') and torch.backends.mps.is_available():
             return {
                 "available": True,
@@ -105,13 +105,13 @@ def check_gpu_availability() -> dict:
         return {"available": False, "reason": "PyTorch not installed"}
 
 
-# Checks if local LLM inference is available.
+# Checks whether local LLM inference is possible (a GPU is available).
 def is_local_llm_available() -> bool:
     gpu_info = check_gpu_availability()
     return gpu_info.get("available", False)
 
 
-# Determines the best available device backend.
+# Returns the best available device backend: cuda, mps or cpu.
 def get_device_backend() -> str:
     try:
         import torch
@@ -126,11 +126,13 @@ def get_device_backend() -> str:
         return "cpu"
 
 
-# Loads a local LLM model and tokenizer.
-# device: e.g. "cuda:0", "cuda:1". If None, uses device_map="auto" (model decides).
-# dtype: "float16", "float32" or "bfloat16" on any backend; None keeps the default (float32 on MPS, else the config's).
-# On MPS an explicit dtype loads the weights straight onto the GPU instead of loading on the CPU and moving them,
-# which holds two copies at once. revision: a Hugging Face commit to pin the weights; None takes the latest.
+# Loads a local LLM and its tokenizer.
+# - device: e.g. "cuda:0" or "cuda:1". If None, device_map="auto" is used and the library decides.
+# - dtype: "float16", "float32" or "bfloat16" on any backend.
+#   None keeps the default (float32 on MPS, else the config's).
+#   On MPS an explicit dtype loads the weights straight onto the GPU. Otherwise they load on the CPU and are moved,
+#   which holds two copies at once.
+# - revision: a Hugging Face commit that pins the weights. None takes the latest.
 def load_local_model(
     model_name: str,
     cache: bool = True,
@@ -159,7 +161,7 @@ def load_local_model(
             f"ERROR: {e}"
         )
     
-    # Checks for offline mode (HPC clusters without internet)
+    # Offline mode, for HPC clusters without internet
     offline_mode = (
         os.getenv("HF_HUB_OFFLINE", "0") == "1" or
         os.getenv("TRANSFORMERS_OFFLINE", "0") == "1"
@@ -167,20 +169,20 @@ def load_local_model(
     if offline_mode:
         logger.info("OFFLINE MODE ENABLED. USING CACHED MODELS ONLY.")
     
-    # Determines device backend
+    # Find the device backend
     device_backend = get_device_backend()
     logger.info(f"USING DEVICE BACKEND: {device_backend}")
-    
-    # Gets model config
+
+    # Get the model config
     if model_name in LOCAL_MODELS:
         config = LOCAL_MODELS[model_name]
     else:
-        # Assumes it's a HuggingFace model ID
+        # Treat the name as a HuggingFace model ID
         config = LocalModelConfig(model_id=model_name, model_type="auto")
     
     logger.info(f"LOADING MODEL: {config.model_id}")
     
-    # Configures quantization (CUDA only)
+    # Set up quantization (CUDA only)
     quantization_config = None
     if device_backend == "cuda":
         if config.load_in_4bit:
@@ -197,7 +199,7 @@ def load_local_model(
     elif device_backend == "mps" and (config.load_in_4bit or config.load_in_8bit):
         logger.warning("QUANTIZATION NOT SUPPORTED ON MPS, LOADING FULL PRECISION MODEL")
     
-    # Determines torch dtype
+    # Pick the torch dtype
     dtype_map = {
         "float16": torch.float16,
         "float32": torch.float32,
@@ -206,22 +208,22 @@ def load_local_model(
     if dtype is not None:
         torch_dtype = dtype_map[dtype]
     elif device_backend == "mps":
-        torch_dtype = torch.float32  # MPS works best with float32 for better performance
+        torch_dtype = torch.float32  # float32 performs best on MPS
     else:
         torch_dtype = dtype_map.get(config.torch_dtype, torch.float16)
     
-    # Determines device_map
+    # Pick the device_map
     # If a specific device is requested (e.g. "cuda:1"), pin the model there.
     if device is not None and device_backend == "cuda":
         device_map = device
     elif device_backend == "mps":
-        device_map = "mps" if dtype is not None else None  # else: load on CPU first, move to MPS later
+        device_map = "mps" if dtype is not None else None  # None: load on the CPU first, move to MPS later
     elif device_backend == "cuda":
         device_map = config.device_map
     else:
         device_map = None
     
-    # Loads tokenizer and model
+    # Load the tokenizer and the model
     try:
         hf_cache = os.environ.get("TRANSFORMERS_CACHE") or os.environ.get("HF_HOME")
         cache_kwargs = {"cache_dir": hf_cache} if hf_cache else {}
@@ -274,16 +276,16 @@ def load_local_model(
             )
         raise
     
-    # Moves model to MPS if using Apple Silicon
+    # On Apple Silicon, move the model to MPS
     if device_backend == "mps":
         model = model.to("mps")
         logger.info("MODEL MOVED TO MPS DEVICE")
-    
-    # Sets up special tokens
+
+    # Use the end-of-sequence token for padding if the tokenizer has no pad token
     if tokenizer.pad_token is None:
         tokenizer.pad_token = tokenizer.eos_token
-    
-    # Sets model to eval mode
+
+    # Switch the model to eval mode
     model.eval()
     
     actual_device = device or device_backend
@@ -295,12 +297,12 @@ def load_local_model(
     return model, tokenizer
 
 
-# Gets list of allowed token IDs for time series generation.
+# Returns the token IDs the model may produce when generating a time series.
 def get_allowed_token_ids(
     tokenizer,
     time_sep: str = ",",
 ) -> List[int]:
-    # Characters allowed in time series output
+    # Characters allowed in the time series output
     allowed_chars = list("0123456789")
     allowed_chars.extend([time_sep, "-", " "])
     
@@ -315,15 +317,15 @@ def get_allowed_token_ids(
     return list(allowed_ids)
 
 
-# Gets bad_words_ids to block non-numeric tokens during generation. 
-# This is CRITICAL for reliable time series output. Without this, models often generate explanatory text instead of just numbers.
+# Returns the bad_words_ids that block non-numeric tokens during generation.
+# This is critical for reliable output. Without it, models often write explanations instead of just numbers.
 def get_bad_words_ids(
     tokenizer,
     time_sep: str = ",",
 ) -> List[List[int]]:
     allowed_ids = set(get_allowed_token_ids(tokenizer, time_sep))
     
-    # Blocks all tokens not in allowed set
+    # Block every token that is not allowed
     bad_ids = []
     vocab_size = len(tokenizer)
     
@@ -335,7 +337,7 @@ def get_bad_words_ids(
     return bad_ids
 
 
-# Returns list of GPU indices that have at least `min_free_gb` of free VRAM.
+# Returns the indices of the GPUs that have at least `min_free_gb` of free VRAM.
 def _get_usable_gpus(min_free_gb: float = 15.0) -> List[int]:
     import torch
     if not torch.cuda.is_available():
@@ -354,14 +356,14 @@ def _get_usable_gpus(min_free_gb: float = 15.0) -> List[int]:
 
 
 # Multi-GPU behaviour (automatic):
-#   A 7B model in float16 fits entirely in ~14 GB of VRAM. With 4× A100s
-#   (4×40 GB = 160 GB total) device_map="auto" puts the whole model on GPU 0
-#   and never touches the rest. This function detects the GPU count at runtime.
-#   When > 1 GPU is available it loads one model copy per GPU and generates
-#   each path on a separate device in parallel threads — close to N_gpu speedup.
-#   When only 1 GPU (or CPU) is available the single-device batched path is used.
-#   GPUs occupied by other processes (< 15 GiB free) are automatically skipped.
-#   multi_gpu=False always uses the single-device path (one device, batch_size honoured).
+#   - A 7B model in float16 fits in ~14 GB of VRAM. With 4× A100s (4×40 GB = 160 GB total),
+#     device_map="auto" puts the whole model on GPU 0 and never uses the rest.
+#   - This function counts the usable GPUs at runtime.
+#   - With more than 1 GPU, it loads one model copy per GPU. Each path is generated on its own device
+#     in parallel threads, which gives close to an N_gpu speedup.
+#   - With 1 GPU (or only the CPU), it uses the single-device batched path.
+#   - GPUs used by other processes (< 15 GiB free) are skipped.
+#   - multi_gpu=False always uses the single-device path (one device, batch_size is honoured).
 def local_llm_completion(
     input_str: str,
     settings,  # SerializerSettings from serialize.py
@@ -446,20 +448,20 @@ def _generate_forecasts_single_device(
         f"FORECASTS={num_forecasts}, TEMPERATURE={temperature}"
     )
     
-    # Gets bad_words_ids for token control
+    # Get the bad_words_ids for token control
     bad_words_ids = get_bad_words_ids(tokenizer, settings.time_sep)
     logger.info(f"BLOCKING {len(bad_words_ids)} NON-NUMERIC TOKENS")
-    
-    # Determines device
+
+    # Find the device the model is on
     device = next(model.parameters()).device
 
-     # Generates completions in batches
+     # Generate the completions in batches
     all_completions: List[str] = []
     num_batches = (num_forecasts + batch_size - 1) // batch_size
 
     for batch_idx in range(num_batches):
 
-        # Tokenizes input
+        # Tokenize the input
         current_batch_size = min(batch_size, num_forecasts - len(all_completions))
 
         inputs = tokenizer(
@@ -469,7 +471,7 @@ def _generate_forecasts_single_device(
         )
         inputs = {k: v.to(device) for k, v in inputs.items()}
 
-        # Gets number of input tokens
+        # Count the input tokens
         num_input_tokens = inputs["input_ids"].shape[1]
 
         with torch.no_grad():
@@ -520,8 +522,8 @@ def _generate_forecasts_multi_gpu(
     base, remainder = divmod(num_forecasts, n_gpus)
     paths_per_gpu = [base + (1 if i < remainder else 0) for i in range(n_gpus)]
 
-    # Pre-load models SEQUENTIALLY to avoid HuggingFace cache lock
-    # contention.  Once cached in _model_cache, parallel inference is safe.
+    # Pre-load the models one after another, to avoid HuggingFace cache lock contention.
+    # Once they are in _model_cache, parallel inference is safe.
     for idx, gpu_id in enumerate(gpu_ids):
         if paths_per_gpu[idx] > 0:
             device_str = f"cuda:{gpu_id}"
@@ -578,7 +580,7 @@ def _generate_forecasts_multi_gpu(
     return all_completions[:num_forecasts]
 
 
-# Computes negative log-likelihood of target given input.
+# Computes the negative log-likelihood of the target given the input.
 def compute_nll(
     model,
     tokenizer,
@@ -592,7 +594,7 @@ def compute_nll(
     
     full_series = input_str + target_str
     
-    # Tokenizes input
+    # Tokenize the input
     batch = tokenizer(
         [full_series],
         return_tensors="pt",
@@ -602,25 +604,25 @@ def compute_nll(
     device = next(model.parameters()).device
     batch = {k: v.to(device) for k, v in batch.items()}
     
-    # Performs forward pass
+    # Forward pass
     with torch.no_grad():
         outputs = model(**batch)
     
-    # Gets allowed tokens and masks others
+    # Mask every token that is not allowed
     allowed_ids = set(get_allowed_token_ids(tokenizer, settings.time_sep))
     bad_tokens = [i for i in range(len(tokenizer)) if i not in allowed_ids]
     outputs['logits'][:, :, bad_tokens] = -100
     
-    # Computes log probabilities
-    input_ids = batch['input_ids'][0][1:]  # Skips BOS token
+    # Log probabilities
+    input_ids = batch['input_ids'][0][1:]  # Skip the BOS token
     logprobs = torch.nn.functional.log_softmax(outputs['logits'], dim=-1)[0][:-1]
     logprobs = logprobs[torch.arange(len(input_ids)), input_ids].cpu().numpy()
     
-    # Finds where target starts
+    # Find where the target starts
     input_len = len(tokenizer([input_str], return_tensors="pt")['input_ids'][0])
-    input_len = input_len - 2  # Removes special tokens
-    
-    # Computes NLL on target portion
+    input_len = input_len - 2  # Remove the special tokens
+
+    # NLL of the target part
     target_logprobs = logprobs[input_len:]
     num_target_steps = len(target_str.split(settings.time_sep)) - 1
     
@@ -629,14 +631,14 @@ def compute_nll(
     
     bpd = -target_logprobs.sum() / num_target_steps
     
-    # Converts to continuous NLL
+    # Convert to a continuous NLL
     # log p(x) = log p(token) - log bin_width = log p(token) + prec * log(base)
     continuous_nll = bpd - settings.prec * np.log(settings.base)
     
     return float(continuous_nll)
 
 
-# Clears the model cache to free GPU memory.
+# Empties the model cache to free GPU memory.
 def clear_model_cache():
     global _model_cache
     

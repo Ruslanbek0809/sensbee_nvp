@@ -1,6 +1,6 @@
-# Tests for load_sensor_series_from_json() through the real loader on a small JSON file in tmp_path: event-based
-# columns must be clipped at 0 like the service path (src/data_access/sensbee_client.py), so fixtures and live data
-# give the same series.
+# Tests for load_sensor_series_from_json() through the real loader on a small JSON file in tmp_path.
+# Event-based columns must be clipped at 0 like the service path (src/data_access/sensbee_client.py).
+# That way fixtures and live data give the same series.
 
 import json
 

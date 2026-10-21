@@ -1,13 +1,17 @@
 # Baseline forecasters for the benchmark harness (decisions D-B1–D-B6, docs in the thesis plan for the baselines
-# step): AutoGluon's local models and statsforecast's MSTL behind the runner contract. Each entry gives a builder
-# (returns the forecaster and the parameters recorded in run.json), the context lengths in days it may run on, and
-# whether it is scored as a point forecaster. Heavy libraries load only when a forecaster is built or called, so this
-# module imports in the service venv too. Zero-shot foundation models (ZERO_SHOT) are kept apart from the baselines:
-# they need downloaded weights, so their tests run only with -m integration. Each is pinned to a Hugging Face model id
-# and revision, and runs on every context length its model can read: 1 to 28 days for all of them (2 days checks
-# whether two daily cycles help over one), longer ones only for the models whose context limit allows them. Trained
-# models (TRAINED) build a trainer instead of a forecaster: the runner fits one model per sensor on the data before the
-# period (benchmark/runner.py header).
+# step): AutoGluon's local models and statsforecast's MSTL behind the runner contract.
+# Each entry gives:
+# - a builder, which returns the forecaster and the parameters recorded in run.json;
+# - the context lengths in days it may run on;
+# - whether it is scored as a point forecaster.
+# Heavy libraries load only when a forecaster is built or called, so this module imports in the service venv too.
+# Zero-shot foundation models (ZERO_SHOT) are kept apart from the baselines.
+# They need downloaded weights, so their tests run only with -m integration.
+# Each is pinned to a Hugging Face model id and revision.
+# Each runs on every context length its model can read: 1 to 28 days for all of them
+# (2 days checks whether two daily cycles help over one), and longer ones only where the model's context limit allows.
+# Trained models (TRAINED) build a trainer instead of a forecaster.
+# The runner fits one model per sensor on the data before the period (benchmark/runner.py header).
 
 from dataclasses import dataclass
 from importlib.metadata import PackageNotFoundError, version
@@ -43,11 +47,14 @@ PACKAGES = ("autogluon.timeseries", "statsforecast", "statsmodels", "scipy", "to
             "lightgbm", "mlforecast", "gluonts", "lightning")
 
 
-# One baseline: build() → (forecaster, parameters), or (trainer, parameters) when trained; contexts: the allowed
-# context lengths in days; weights: for a zero-shot model, (model id, revision, weight file name) in the Hugging Face
-# cache; trained: build() returns a trainer, fitted per sensor by the runner; covariate_kinds: the covariate kinds
-# (benchmark/covariates.py) its forecaster or trainer accepts, none by default; covariate_groups: the feature groups a
-# covariate set must contain for it (the "0 when closed" models need the opening profile).
+# One baseline.
+# - build(): returns (forecaster, parameters), or (trainer, parameters) when trained.
+# - contexts: the allowed context lengths in days.
+# - weights: for a zero-shot model, (model id, revision, weight file name) in the Hugging Face cache.
+# - trained: build() returns a trainer, which the runner fits per sensor.
+# - covariate_kinds: the covariate kinds (benchmark/covariates.py) its forecaster or trainer accepts, none by default.
+# - covariate_groups: the feature groups a covariate set must contain for it
+#   (the "0 when closed" models need the opening profile).
 @dataclass(frozen=True)
 class Baseline:
     build: Callable
@@ -58,11 +65,12 @@ class Baseline:
     covariate_groups: tuple[str, ...] = ()
 
 
-# AutoGluon SeasonalNaive uses its seasonal branch only when the context has more than m + 1 steps, otherwise it
-# silently returns Naive (abstract_local_model.py:239), so m = 96 runs from 7 days and m = 672 from 14 days.
-# Seasonal AutoARIMA (season 96) is not in the list: even on 7-day contexts it took > 5 CPU-hours for 18% of the test
-# workload (validation smoke, 2026-10-05), so the owner chose STL + ARIMA instead (sf_mstl_arima). MSTL needs two
-# cycles of each season.
+# AutoGluon SeasonalNaive uses its seasonal branch only when the context has more than m + 1 steps.
+# Otherwise it silently returns Naive (abstract_local_model.py:239).
+# So m = 96 runs from 7 days and m = 672 runs from 14 days.
+# Seasonal AutoARIMA (season 96) is not in the list. Even on 7-day contexts it took > 5 CPU-hours for 18% of the test
+# workload (validation smoke, 2026-10-05), so the owner chose STL + ARIMA instead (sf_mstl_arima).
+# MSTL needs two cycles of each season.
 BASELINES: dict[str, Baseline] = {
     "ag_naive": Baseline(lambda: autogluon_forecaster("Naive", {}), (1, 7, 14, 28)),
     "ag_snaive96": Baseline(lambda: autogluon_forecaster("SeasonalNaive", {"seasonal_period": SEASON}), (7, 14, 28)),
@@ -77,8 +85,9 @@ BASELINES: dict[str, Baseline] = {
 }
 
 # Zero-shot foundation models. Chronos-2 reads up to 8,192 steps, so 85 days (8,160 steps) is its longest context.
-# A zero-shot model pinned to one (model id, revision): its forecaster factory is built with that pin, and the cache
-# check of its tests looks for the weight file at the same pin.
+# A zero-shot model pinned to one (model id, revision).
+# Its forecaster factory is built with that pin, and the cache check in its tests looks for the weight file at the
+# same pin.
 def _zero_shot(factory: Callable, pin: tuple[str, str], contexts: tuple[int, ...],
                weight_file: str = "model.safetensors", covariate_kinds: tuple[str, ...] = ()) -> Baseline:
     return Baseline(lambda: factory(*pin), contexts, (*pin, weight_file), covariate_kinds=covariate_kinds)
@@ -86,11 +95,11 @@ def _zero_shot(factory: Callable, pin: tuple[str, str], contexts: tuple[int, ...
 
 ZERO_SHOT: dict[str, Baseline] = {
     "chronos2": _zero_shot(chronos2_forecaster, CHRONOS2, (1, 2, 7, 14, 28, 56, 85), covariate_kinds=COVARIATE_KINDS),
-    # Chronos-Bolt reads at most 2,048 steps: its 28-day context is cut to the last 21.3 days by the model.
+    # Chronos-Bolt reads at most 2,048 steps, so the model cuts its 28-day context to the last 21.3 days.
     "chronos_bolt_base": _zero_shot(chronos_bolt_forecaster, CHRONOS_BOLT_BASE, (1, 2, 7, 14, 28)),
     # TimesFM 2.5 reads up to 16,256 steps next to its 128-step output block, so 169 days (16,224 steps) is its longest.
     "timesfm25": _zero_shot(timesfm25_forecaster, TIMESFM25, (1, 2, 7, 14, 28, 56, 85, 169)),
-    # TiRex reads at most 2,048 steps: its 28-day context is cut to the last 21.3 days by the model.
+    # TiRex reads at most 2,048 steps, so the model cuts its 28-day context to the last 21.3 days.
     "tirex": _zero_shot(tirex_forecaster, TIREX, (1, 2, 7, 14, 28), "model.ckpt"),
     # Toto reads the last 4,096 steps (AutoGluon's default), more than the 2,688 of 28 days; it samples 256 paths.
     "toto": _zero_shot(toto_forecaster, TOTO, (1, 2, 7, 14, 28)),
@@ -99,10 +108,11 @@ ZERO_SHOT: dict[str, Baseline] = {
 }
 
 
-# Trained models (Phase 3): one model per sensor, fitted on the data before the period and frozen. Their input window
-# (at most 863 steps: DeepAR's 192 unrolled steps plus its 672-step lag) fits the 14-day context, so they run on 14 and
-# 28 days. RecursiveTabular is a point forecaster (its intervals come from the context, not the model; decision D3-5).
-# DeepAR and PatchTST stop early on the final TUNING_DAYS before the cutoff.
+# Trained models (Phase 3): one model per sensor, fitted on the data before the period and then frozen.
+# Their input window (at most 863 steps: DeepAR's 192 unrolled steps plus its 672-step lag) fits the 14-day context,
+# so they run on 14 and 28 days.
+# RecursiveTabular is a point forecaster (its intervals come from the context, not the model; decision D3-5).
+# DeepAR and PatchTST stop early, using the final TUNING_DAYS before the cutoff.
 TRAINED: dict[str, Baseline] = {
     "ag_direct_tabular": Baseline(lambda: autogluon_trainer("DirectTabular", DIRECT_TABULAR), (14, 28), trained=True,
                                   covariate_kinds=("known",)),
@@ -116,19 +126,21 @@ TRAINED: dict[str, Baseline] = {
 }
 
 
-# LLMTime (Phase 3, the research project's method) with Mistral-7B-v0.1, local: the "LLMTime-like" setting of the
-# research project (5 samples, temperature 0.9, normalized) on 14-day contexts only (≈ 6-7k prompt tokens; the runs
-# use a fixed origin subset, --origin-stride). Kept apart from ZERO_SHOT so its integration tests don't load 14.5 GB.
+# LLMTime (Phase 3, the research project's method) with Mistral-7B-v0.1, run locally.
+# It uses the "LLMTime-like" setting of the research project (5 samples, temperature 0.9, normalized).
+# It runs on 14-day contexts only (≈ 6-7k prompt tokens). The runs use a fixed origin subset (--origin-stride).
+# It is kept apart from ZERO_SHOT so that the integration tests of ZERO_SHOT don't load 14.5 GB.
 LLMTIME: dict[str, Baseline] = {
     "llmtime_mistral7b": _zero_shot(llmtime_forecaster, MISTRAL_7B, (14,), "model-00001-of-00002.safetensors"),
 }
 
 
 # "0 when closed" baselines (Phase 4, RQ2): a values-only base with every quantile set to 0 where the learned opening
-# profile is below a threshold. build(threshold) → (forecaster, parameters); they run only with a covariate set that
-# has "open_share" (cal_open), on the halls, at the base's contexts (Chronos-2 at 28 days only, the headline context).
-# mask0_chronos2_recent (Phase 5, D5-2) takes the profile from each 28-day context instead, the rule the service
-# applies; it needs no covariate set.
+# profile is below a threshold. build(threshold) → (forecaster, parameters).
+# They run only with a covariate set that has "open_share" (cal_open), on the halls, at the base's contexts
+# (Chronos-2 at 28 days only, the headline context).
+# mask0_chronos2_recent (Phase 5, D5-2) takes the profile from each 28-day context instead, which is the rule the
+# service applies. It needs no covariate set.
 MASKED: dict[str, Baseline] = {
     "mask0_snaive672": Baseline(lambda threshold: mask_forecaster(BASELINES["ag_snaive672"].build, threshold,
                                                                   "ag_snaive672"),

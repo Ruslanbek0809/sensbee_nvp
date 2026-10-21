@@ -13,8 +13,8 @@ pytest.importorskip("uni2ts")
 
 ROOT = Path(__file__).resolve().parents[2]
 
-# In a fresh interpreter: the classes the adapter imports don't pull in uni2ts/common/env.py, whose import calls
-# load_dotenv() and would read sensbee_nvp's dotenv file (the SensBee keys) into the process.
+# Runs in a fresh interpreter. The classes the adapter imports must not pull in uni2ts/common/env.py.
+# Importing that file calls load_dotenv(). That would read sensbee_nvp's dotenv file (SensBee keys) into the process.
 CHECK = """
 import sys
 from uni2ts.model.moirai2 import Moirai2Forecast, Moirai2Module

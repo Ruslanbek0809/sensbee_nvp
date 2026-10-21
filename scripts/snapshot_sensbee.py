@@ -1,11 +1,13 @@
 #!/usr/bin/env python3
-# Downloads a frozen snapshot of the SensBee sensors used in the thesis: raw rows (all columns) as CSV.gz, a manifest
-# with a SHA-256 hash per file, and a data-quality report. Read-only against the API.
+# Downloads a frozen snapshot of the SensBee sensors used in the thesis.
+# It writes the raw rows (all columns) as CSV.gz, a manifest with a SHA-256 hash per file, and a data-quality report.
+# It only reads from the API.
 #
-# Rows are fetched in calendar-month windows. The server treats from/to as inclusive, so rows at exactly a window's
-# end are dropped here and come back with the next window. A cross-check compares our 15-min aggregation of the raw
-# rows with SensBee's own time_grouping buckets, for every numeric column and month. Sensors are named by their env
-# prefix; READ keys and sensor UUIDs are never written or printed.
+# Rows are fetched in calendar-month windows. The server treats from/to as inclusive.
+# So rows at exactly a window's end are dropped here and come back with the next window.
+# A cross-check compares our 15-min aggregation of the raw rows with SensBee's own time_grouping buckets.
+# It runs for every numeric column and month.
+# Sensors are named by their env prefix. READ keys and sensor UUIDs are never written or printed.
 #
 # Usage (from sensbee_nvp/):
 #   venv/bin/python scripts/snapshot_sensbee.py --out ../../benchmark_data/snapshots
@@ -35,7 +37,7 @@ from src.data_access.sensbee_client import (  # noqa: E402
     COLUMN_AGGREGATIONS, DEFAULT_AGGREGATION, DEFAULT_BASE_URL, SensbeeClient,
 )
 
-# Sensors in the snapshot (env prefix → target column for the quality report); roadmap decision D3.
+# Sensors in the snapshot (env prefix to target column for the quality report). Roadmap decision D3.
 TARGET_COLUMNS: dict[str, str] = {
     "MANEBACH_WEATHER_STATION": "temperature",
     "STUTZERBACH_WEATHER_STATION": "temperature",
@@ -49,15 +51,16 @@ BUCKET_LIMIT = 31 * BUCKETS_PER_DAY + 10   # 15-min buckets per month window, pl
 MATCH_ATOL = 1e-6                          # Postgres AVG vs pandas mean can differ in the last float digits
 
 
-# Splits [since, until) at calendar-month starts: [(since, next month start), ..., (last month start, until)].
+# Splits [since, until) at calendar-month starts, giving [(since, next month start), ..., (last month start, until)].
 def month_windows(since: pd.Timestamp, until: pd.Timestamp) -> list[tuple[pd.Timestamp, pd.Timestamp]]:
     starts = [t for t in pd.date_range(since, until, freq="MS") if since < t < until]
     edges = [since, *starts, until] if since < until else []
     return list(zip(edges[:-1], edges[1:]))
 
 
-# Fetches [since, until) month by month and returns one frame. The server's from/to are inclusive, so rows at exactly
-# a window's end are dropped here and come back with the next window. A window that fills the limit raises.
+# Fetches [since, until) month by month and returns one frame.
+# The server's from/to are inclusive, so rows at exactly a window's end are dropped here and come back with the next
+# window. A window that fills the limit raises an error.
 def fetch_windows(client: SensbeeClient, sensor_id: str, api_key: Optional[str], since: pd.Timestamp,
                   until: pd.Timestamp, time_col: str, limit: int, **params) -> pd.DataFrame:
     frames = []
@@ -79,8 +82,9 @@ def fetch_raw(client: SensbeeClient, sensor_id: str, api_key: Optional[str],
     return fetch_windows(client, sensor_id, api_key, since, until, TIME_COL, WINDOW_LIMIT)
 
 
-# Compares our 15-min aggregation of the raw rows with SensBee's own time_grouping buckets for every numeric column.
-# Returns per column: buckets compared, mismatches (a bucket present on only one side counts) and the max abs diff.
+# Compares our 15-min aggregation of the raw rows with SensBee's own time_grouping buckets, for every numeric column.
+# Returns per column: the buckets compared, the mismatches and the max absolute difference.
+# A bucket present on only one side counts as a mismatch.
 def cross_check(client: SensbeeClient, sensor_id: str, api_key: Optional[str], raw: pd.DataFrame,
                 since: pd.Timestamp, until: pd.Timestamp) -> dict:
     numeric = [c for c in raw.columns if c != TIME_COL and pd.api.types.is_numeric_dtype(raw[c])]
@@ -130,8 +134,8 @@ def quality_report(manifest: dict) -> str:
     return "\n".join(lines) + "\n"
 
 
-# Downloads, cross-checks and writes one snapshot; sensors maps env prefix → (sensor_id, read_key). Nothing is written
-# until every sensor has been fetched and checked. Returns the new snapshot folder.
+# Downloads, cross-checks and writes one snapshot. sensors maps env prefix to (sensor_id, read_key).
+# Nothing is written until every sensor has been fetched and checked. Returns the new snapshot folder.
 def take_snapshot(sensors: dict[str, tuple[str, Optional[str]]], until: pd.Timestamp, out_root: Path,
                   since: Optional[pd.Timestamp] = None, base_url: str = DEFAULT_BASE_URL) -> Path:
     snapshot_id = f"sensbee-{since:%Y-%m-%d}-{until:%Y-%m-%d}" if since is not None else f"sensbee-{until:%Y-%m-%d}"
@@ -212,7 +216,7 @@ def main() -> None:
             raise SystemExit(f"MISSING {name}_SENSOR_UUID in the env file")
         sensors[name] = (sensor_id, (os.getenv(f"{name}_MY_API_KEY_READ") or "").strip() or None)
 
-    # Whole days only: month windows then split on 00:00, which is also a bucket edge on the server
+    # Whole days only, so month windows split at 00:00. That is also a bucket edge on the server.
     until = (pd.Timestamp(args.until).floor("D") if args.until
              else pd.Timestamp(datetime.now(timezone.utc).replace(tzinfo=None)).floor("D"))
     since = pd.Timestamp(args.since).floor("D") if args.since else None

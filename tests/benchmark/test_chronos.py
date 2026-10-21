@@ -1,9 +1,11 @@
-# Integration tests for the Chronos-2 forecaster in benchmark/models: output shape, batch independence (an origin
-# forecast alone equals the same origin inside a batch), determinism, an all-zero context (closed facility), a smoke run
-# on the RP temperature fixture, a cross-check against AutoGluon's Chronos2 wrapper with cross-learning off, and with
-# covariate windows (Phase 4): batch independence, and that future covariates are used while a past-only column's
-# future never reaches the model. They need the model weights in the local Hugging Face cache and never download
-# them: run in the bench venv with
+# Integration tests for the Chronos-2 forecaster in benchmark/models:
+# - output shape, determinism, and batch independence (an origin forecast alone equals the same origin inside a batch)
+# - an all-zero context (closed facility)
+# - a smoke run on the RP temperature fixture
+# - a cross-check against AutoGluon's Chronos2 wrapper with cross-learning off
+# - covariate windows (Phase 4): batch independence, future covariates are used, and the future of a past-only column
+#   never reaches the model
+# They need the model weights in the local Hugging Face cache and never download them. Run in the bench venv with
 #   HF_HUB_OFFLINE=1 venv-bench/bin/python -m pytest tests/benchmark/test_chronos.py -m integration -q
 
 from pathlib import Path

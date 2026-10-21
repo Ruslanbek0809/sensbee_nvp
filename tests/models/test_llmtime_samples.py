@@ -1,6 +1,8 @@
-# Tests for llmtime_samples() and nvp_llms_forecast() with mocked completions (no LLM, no network): every filter rule
-# and parse failure is counted, the valid samples stay on the model's scale, and the service forecast keeps its
-# behaviour: median of the valid samples mapped back, last-value fallback when all are filtered, visitor clipping.
+# Tests for llmtime_samples() and nvp_llms_forecast() with mocked completions (no LLM, no network):
+# - every filter rule and parse failure is counted
+# - the valid samples stay on the model's scale
+# - the service forecast keeps its behaviour: the median of the valid samples mapped back, the last-value fallback
+#   when all are filtered, and visitor clipping
 
 from unittest.mock import patch
 

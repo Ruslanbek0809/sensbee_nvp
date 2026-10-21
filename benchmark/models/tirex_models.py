@@ -1,14 +1,18 @@
 # TiRex (tirex-ts 1.4.2, an xLSTM forecaster) as a zero-shot harness forecaster (contract: benchmark/runner.py header).
 #
-# The model is loaded once per build at a pinned Hugging Face revision, with the plain torch backend (the CUDA kernels
-# need an NVIDIA GPU) and without torch.compile. It reads at most train_ctx_len = 2,048 steps (21.3 days at 15 min) and
-# cuts longer contexts itself, so its "28-day" forecasts use the last 2,048 steps; shorter contexts are left-padded with
-# masked NaNs. Steps beyond the 32-step output patch are produced by feeding the future patches in as missing values,
-# not by feeding predictions back. Frequency resampling (resample_strategy) stays off. The 9 trained quantiles are the
-# deciles, read out by level. Series are forecast independently and the model is deterministic, so the seed is unused.
-# Each call runs on one torch thread (restored afterwards): with several threads the batched rollout after the first
-# patch differs from a single-series call by up to 0.2% (float arithmetic, not information from other series: swapping
-# them changes nothing), while one thread gives identical forecasts alone and in a batch at about the same speed.
+# The model is loaded once per build at a pinned Hugging Face revision.
+# It uses the plain torch backend (the CUDA kernels need an NVIDIA GPU) and no torch.compile.
+# It reads at most train_ctx_len = 2,048 steps (21.3 days at 15 min) and cuts longer contexts itself.
+# So its "28-day" forecasts use the last 2,048 steps. Shorter contexts are left-padded with masked NaNs.
+# Steps beyond the 32-step output patch are produced by feeding the future patches in as missing values, not by
+# feeding predictions back.
+# Frequency resampling (resample_strategy) stays off.
+# The 9 trained quantiles are the deciles, read out by level.
+# Series are forecast independently and the model is deterministic, so the seed is unused.
+# Each call runs on one torch thread (restored afterwards).
+# With several threads, the batched rollout after the first patch differs from a single-series call by up to 0.2%.
+# That is float arithmetic, not information from other series (swapping them changes nothing).
+# One thread gives identical forecasts alone and in a batch, at about the same speed.
 # Weights: NXAI Community Licence (not Apache-2.0).
 
 import logging

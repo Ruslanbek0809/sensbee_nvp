@@ -1,11 +1,15 @@
-# Benchmark tasks on a frozen snapshot: the 15-min target series of each sensor, its validation and test periods,
-# forecast origins every 6 h with a validity rule (gaps, outages), and the context and target windows.
+# Benchmark tasks on a frozen snapshot. This module holds:
+# - the 15-min target series of each sensor and its validation and test periods;
+# - forecast origins every 6 h, with a validity rule (gaps, outages);
+# - the context and target windows.
 #
-# Targets are built the way the service builds them (src/data_access/sensbee_client.py:145-161): SensBee's AVG/MAX
-# bucket, then for visitor counts ffill up to 2 h, 0 after that and clip at 0; the parking counter is forward-filled.
-# Weather targets are never filled: an origin whose window has a gap is invalid, and only contexts are forward-filled.
-# Every fill runs forward in time and contexts are cut at the origin before filling, so no value at or after an origin
-# can reach its context. Timestamps are naive UTC.
+# Targets are built the way the service builds them (src/data_access/sensbee_client.py:145-161).
+# - Every target starts as SensBee's AVG/MAX bucket.
+# - Visitor counts are forward-filled for up to 2 h, set to 0 after that, and clipped at 0.
+# - The parking counter is forward-filled.
+# - Weather targets are never filled. An origin whose window has a gap is invalid, and only contexts are forward-filled.
+# Every fill runs forward in time, and contexts are cut at the origin before filling.
+# So no value at or after an origin can reach its context. Timestamps are naive UTC.
 
 from dataclasses import dataclass
 from typing import Optional
@@ -33,9 +37,12 @@ TRAIN_GAP_BUCKETS = BUCKETS_PER_DAY        # training data: gaps longer than 24 
 MIN_TRAIN_DAYS = 14                        # training pieces shorter than this are dropped
 
 
-# One sensor's forecasting task. kind: "regular" (weather; gaps stay NaN), "visitors" (event counter that resets
-# overnight; service fill rule) or "counter" (drifting entry/exit counter; forward-filled). Periods are naive UTC;
-# validation is the VALIDATION_DAYS before test_start. exclusions: (start, end, reason), [start, end), naive UTC.
+# One sensor's forecasting task.
+# - kind "regular": weather, gaps stay NaN.
+# - kind "visitors": an event counter that resets overnight, filled with the service rule.
+# - kind "counter": a drifting entry/exit counter, forward-filled.
+# Periods are naive UTC. Validation is the VALIDATION_DAYS before test_start.
+# exclusions: (start, end, reason), as [start, end) in naive UTC.
 # train_start: where a fitted model's training data begins (None = the start of the series).
 @dataclass(frozen=True)
 class SensorTask:
@@ -49,20 +56,24 @@ class SensorTask:
     train_start: Optional[str] = None
 
 
-# Periods where event sensors were silent because of an outage, not because nothing happened. Found by listing the
-# silences > 2 h that start during opening hours (Oct 2025–May 2026); every other one was a regular pause or an
-# early closing.
+# Periods where event sensors were silent because of an outage, not because nothing happened.
+# Found by listing the silences > 2 h that start during opening hours (Oct 2025–May 2026).
+# Every other one was a regular pause or an early closing.
 STREAM_OUTAGE = ("2026-04-13 08:30", "2026-04-14 15:00",
                  "visitor stream and parking silent ~30 h from Mon 10:41 local; the weather stations kept reporting")
 PARKING_SILENCE = ("2026-04-02 09:45", "2026-04-04 08:45",
                    "parking silent 46.8 h from Maundy Thursday 11:53 local while the visitor stream was alive "
                    "(holiday or parking-only outage; excluded to be safe)")
 
-# Test = 56 days: the last 8 weeks of the snapshot for weather, of the season for the halls (last open day: Eishalle
-# 28 Mar, Schwimmhalle 13 May 2026) and before the parking sensor stopped (17 Apr 2026). Parking is secondary: a
-# drifting entry/exit counter, reported on its own and left out of the cross-sensor aggregate. The halls' training
-# data starts at the first open day of the 2025/26 season (2025-10-10, the first nonzero bucket of the shared visitor
-# stream; before it only zeros and two stray test days), so a fitted model doesn't learn the closed summer.
+# Test = 56 days, the last 8 weeks of:
+# - the snapshot, for weather;
+# - the season, for the halls (last open day: Eishalle 28 Mar, Schwimmhalle 13 May 2026);
+# - the time before the parking sensor stopped (17 Apr 2026), for parking.
+# Parking is secondary: it is a drifting entry/exit counter, reported on its own and left out of the cross-sensor
+# aggregate.
+# The halls' training data starts at the first open day of the 2025/26 season. That is 2025-10-10, the first nonzero
+# bucket of the shared visitor stream (before it there are only zeros and two stray test days).
+# So a fitted model doesn't learn the closed summer.
 TASKS: dict[str, SensorTask] = {
     "MANEBACH_WEATHER_STATION": SensorTask("temperature", "AVG", "regular", "2026-08-06", "2026-10-01"),
     "STUTZERBACH_WEATHER_STATION": SensorTask("temperature", "AVG", "regular", "2026-08-06", "2026-10-01"),
@@ -86,8 +97,8 @@ def period_bounds(task: SensorTask, period: str) -> tuple[pd.Timestamp, pd.Times
     raise ValueError(f"UNKNOWN PERIOD {period}")
 
 
-# Builds a sensor's 15-min target on the complete UTC grid from its raw snapshot rows: SensBee's bucket, then the fill
-# rule of its kind. Weather keeps its gaps as NaN.
+# Builds a sensor's 15-min target on the complete UTC grid from its raw snapshot rows.
+# It takes SensBee's bucket, then applies the fill rule of the sensor's kind. Weather keeps its gaps as NaN.
 def target_series(raw: pd.DataFrame, task: SensorTask) -> pd.Series:
     buckets = bucket_15min(raw, task.column, task.aggregation)
     series = buckets.reindex(pd.date_range(buckets.index[0], buckets.index[-1], freq=BUCKET_FREQ))
@@ -104,8 +115,8 @@ def candidate_origins(task: SensorTask, period: str) -> pd.DatetimeIndex:
     return pd.date_range(start, end - GUARD, freq=ORIGIN_FREQ)
 
 
-# Share of observed buckets in [start, end), from the cumulative count of observed buckets on the series grid that
-# starts at `first`. Buckets outside the series count as missing.
+# Share of observed buckets in [start, end). It uses the cumulative count of observed buckets on the series grid
+# that starts at `first`. Buckets outside the series count as missing.
 def _observed_share(cumulative: np.ndarray, first: pd.Timestamp, start: pd.Timestamp, end: pd.Timestamp) -> float:
     n = len(cumulative) - 1
     a = min(max((start - first) // STEP, 0), n)
@@ -113,19 +124,22 @@ def _observed_share(cumulative: np.ndarray, first: pd.Timestamp, start: pd.Times
     return float(cumulative[b] - cumulative[a]) / ((end - start) // STEP)
 
 
-# Context lengths (days) the origin validity rule covers: CONTEXT_DAYS plus the given lengths ("all history", None,
-# has no fixed window to check).
+# Context lengths (days) the origin validity rule covers: CONTEXT_DAYS plus the given lengths.
+# "All history" (None) has no fixed window to check, so it is left out.
 def validity_context_days(context_days: tuple[Optional[int], ...] = ()) -> tuple[int, ...]:
     return tuple(sorted(set(CONTEXT_DAYS) | {days for days in context_days if days is not None}))
 
 
-# Applies the validity rule to every candidate origin of a period. An origin is valid when no listed exclusion
-# overlaps [origin - 24 h, origin + 24 h), the longest context lies inside the series, both 24-h windows around the
-# origin are complete, and every context window is at least MIN_CONTEXT_COVERAGE observed. The context windows are
-# CONTEXT_DAYS plus the given context_days, so a run with longer contexts has its long windows checked as well.
-# Filled kinds (visitors, counter) have no gaps, so only the exclusions and the series bounds apply to them. Returns
-# one row per candidate: the first failing reason, the observed share of each context window, and whether an exclusion
-# lies inside the longest context (for a sensitivity check).
+# Applies the validity rule to every candidate origin of a period. An origin is valid when:
+# - no listed exclusion overlaps [origin - 24 h, origin + 24 h);
+# - the longest context lies inside the series;
+# - both 24-h windows around the origin are complete;
+# - every context window is at least MIN_CONTEXT_COVERAGE observed.
+# The context windows are CONTEXT_DAYS plus the given context_days, so a run with longer contexts has its long windows
+# checked as well.
+# Filled kinds (visitors, counter) have no gaps, so only the exclusions and the series bounds apply to them.
+# Returns one row per candidate: the first failing reason, the observed share of each context window,
+# and whether an exclusion lies inside the longest context (for a sensitivity check).
 def origin_table(series: pd.Series, task: SensorTask, period: str,
                  context_days: tuple[Optional[int], ...] = ()) -> pd.DataFrame:
     context_days = validity_context_days(context_days)
@@ -159,8 +173,8 @@ def origin_table(series: pd.Series, task: SensorTask, period: str,
     return pd.DataFrame(rows)
 
 
-# The context of one origin: the series strictly before the origin, forward-filled, its last `steps` buckets
-# (everything when steps is None). It is cut at the origin before filling, so nothing at or after it can enter.
+# The context of one origin: the last `steps` buckets of the series strictly before the origin, forward-filled
+# (everything when steps is None). The series is cut at the origin before filling, so nothing at or after it can enter.
 def context_window(series: pd.Series, origin: pd.Timestamp, steps: Optional[int]) -> pd.Series:
     past = series.loc[: origin - STEP].ffill().dropna()
     return past if steps is None else past.iloc[-steps:]
@@ -171,8 +185,8 @@ def target_window(series: pd.Series | pd.DataFrame, origin: pd.Timestamp) -> pd.
     return series.reindex(pd.date_range(origin, periods=HORIZON, freq=BUCKET_FREQ))
 
 
-# The values the MASE/SQL scale of an origin is computed on: the SCALE_DAYS before it (unfilled for weather), with the
-# task's exclusions set to NaN so an outage can't distort the scale.
+# The values the MASE/SQL scale of an origin is computed on: the SCALE_DAYS before it (unfilled for weather).
+# The task's exclusions are set to NaN, so an outage can't distort the scale.
 def scale_history(series: pd.Series, origin: pd.Timestamp, task: SensorTask) -> np.ndarray:
     history = series.reindex(pd.date_range(origin - pd.Timedelta(days=SCALE_DAYS), origin, freq=BUCKET_FREQ,
                                            inclusive="left"))
@@ -188,8 +202,9 @@ def _excluded(index: pd.DatetimeIndex, task: SensorTask) -> np.ndarray:
     return mask
 
 
-# Training data for a fitted model: the series strictly before the cutoff. When one model is fitted or tuned on
-# several sensors, the cutoff is the earliest test start among them, because the periods of different sensors overlap
+# Training data for a fitted model: the series strictly before the cutoff.
+# When one model is fitted or tuned on several sensors, the cutoff is the earliest test start among them.
+# The reason is that the periods of different sensors overlap
 # (e.g. Schwimmhalle's validation lies inside Eishalle's test, and both share one event stream).
 def training_series(series: pd.Series, cutoff: pd.Timestamp) -> pd.Series:
     return series.loc[: pd.Timestamp(cutoff) - STEP]
@@ -201,10 +216,12 @@ def training_history(series: pd.Series, task: SensorTask, cutoff: pd.Timestamp) 
     return history if task.train_start is None else history.loc[pd.Timestamp(task.train_start):]
 
 
-# Training items for a fitted model: the series from task.train_start to strictly before the cutoff (training_history),
-# cut into gap-free pieces. Exclusions and gaps longer than TRAIN_GAP_BUCKETS split the series; shorter gaps are
-# forward-filled (the context rule), and pieces shorter than MIN_TRAIN_DAYS are dropped, so a model never learns long
-# flat filled stretches or an outage. Every piece lies on the complete 15-min grid.
+# Training items for a fitted model: the series from task.train_start to strictly before the cutoff
+# (training_history), cut into gap-free pieces.
+# - Exclusions and gaps longer than TRAIN_GAP_BUCKETS split the series.
+# - Shorter gaps are forward-filled (the context rule).
+# - Pieces shorter than MIN_TRAIN_DAYS are dropped.
+# So a model never learns long flat filled stretches or an outage. Every piece lies on the complete 15-min grid.
 def training_items(series: pd.Series, task: SensorTask, cutoff: pd.Timestamp) -> list[pd.Series]:
     history = training_history(series, task, cutoff)
     missing = history.isna()

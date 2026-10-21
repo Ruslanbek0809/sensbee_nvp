@@ -1,12 +1,15 @@
-# "0 when closed" baselines for the halls (Phase 4, RQ2): a values-only base forecaster whose quantiles are all set to
-# 0 at every future step where the hall's learned opening profile (covariate "open_share", benchmark/covariates.py:
-# the share of days with visitors in that Berlin weekday and 15-min slot before the cutoff) is below a threshold. The
-# profile is known in advance, so the rule uses no future observation. These are separate named models, never a
-# post-processing of another model's results (experiments rule, D-B3); the threshold is chosen per hall on the
-# validation period (plan section D). The base sees only its context, as in its own runs.
-# Phase 5 (D5-2): recent_mask_forecaster() takes the profile from each context instead (the last 28 days before the
-# origin, refitted at every origin), the rule the service applies because it doesn't know when a season starts. It
-# needs no covariate set.
+# "0 when closed" baselines for the halls (Phase 4, RQ2).
+# A values-only base forecaster has all its quantiles set to 0 at every future step where the hall's learned opening
+# profile is below a threshold.
+# The profile is the covariate "open_share" (benchmark/covariates.py): the share of days with visitors in that Berlin
+# weekday and 15-min slot before the cutoff.
+# The profile is known in advance, so the rule uses no future observation.
+# These are separate named models, never a post-processing of another model's results (experiments rule, D-B3).
+# The threshold is chosen per hall on the validation period (plan section D).
+# The base sees only its context, as in its own runs.
+# Phase 5 (D5-2): recent_mask_forecaster() takes the profile from each context instead
+# (the last 28 days before the origin, refitted at every origin).
+# This is the rule the service applies, because it doesn't know when a season starts. It needs no covariate set.
 
 import logging
 from typing import Callable
@@ -21,8 +24,10 @@ logger = logging.getLogger(__name__)
 
 
 # Wraps a base builder (→ forecaster, parameters) into a masked forecaster that needs the covariate windows of a set
-# with "open_share", and returns it with its parameters (the base's, its point_only, the threshold, and base_model: the
-# registry name of the base, so the report can test the masked run against the base's own run).
+# with "open_share". Returns it with its parameters:
+# - the base's parameters and its point_only;
+# - the threshold;
+# - base_model, the registry name of the base, so the report can test the masked run against the base's own run.
 def mask_forecaster(base_build: Callable, threshold: float, base_model: str):
     base, base_params = base_build()
 
@@ -41,8 +46,9 @@ def mask_forecaster(base_build: Callable, threshold: float, base_model: str):
 
 
 # Wraps a base builder (→ forecaster, parameters) into a masked forecaster whose opening profile is computed from each
-# context (series_open_profile) and looked up at the horizon's timestamps, which follow the context's last step; it
-# returns it with its parameters (as mask_forecaster, plus where the profile comes from).
+# context (series_open_profile).
+# The profile is looked up at the horizon's timestamps, which follow the context's last step.
+# Returns it with its parameters (as mask_forecaster, plus where the profile comes from).
 def recent_mask_forecaster(base_build: Callable, threshold: float, base_model: str):
     base, base_params = base_build()
 

@@ -1,6 +1,8 @@
-# Tests for benchmark/metrics.py on examples computed by hand: point and quantile metrics on a 4-step window, the
-# seasonal scale, crossed quantiles, and the relative skill against a reference (pairing, clipping, geometric mean).
-# The last test cross-checks against AutoGluon's metric classes and only runs where autogluon.timeseries is installed.
+# Tests for benchmark/metrics.py on examples computed by hand:
+# - point and quantile metrics on a 4-step window
+# - the seasonal scale and crossed quantiles
+# - the relative skill against a reference (pairing, clipping, geometric mean)
+# The last test cross-checks against AutoGluon's metric classes. It only runs where autogluon.timeseries is installed.
 
 import math
 
@@ -112,9 +114,12 @@ def test_mixed_contexts_or_horizons_are_rejected():
         relative_errors(pd.concat([per_origin, per_origin]), "MAE", "snaive")
 
 
-# Cross-check against AutoGluon's own metric classes (API checked against the v1.6.3 source on 2026-10-01: the scorer
-# takes prediction_length and seasonal_period, error() is lower-is-better, the point forecast is the "mean" column, and
-# the scale uses all data before the last prediction_length steps). Runs only in the AutoGluon venv (task 4).
+# Cross-check against AutoGluon's own metric classes. The API was checked against the v1.6.3 source on 2026-10-01:
+# - the scorer takes prediction_length and seasonal_period
+# - error() is lower-is-better
+# - the point forecast is the "mean" column
+# - the scale uses all data before the last prediction_length steps
+# Runs only in the AutoGluon venv (task 4).
 def test_metrics_match_autogluon():
     pytest.importorskip("autogluon.timeseries")
     from autogluon.timeseries import TimeSeriesDataFrame

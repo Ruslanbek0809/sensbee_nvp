@@ -1,11 +1,12 @@
-# On-demand LLM-based time series forecasting using API and local models. Implements zero-shot forecasting with normalization and optional semantic context.
+# Zero-shot LLM forecasting of time series on demand, with API and local models.
+# It normalizes the series and can add an optional text context to the prompt.
 #
 # Pipeline:
-#   1. Normalize input using quantile scaler (α=0.95, β=0.3)
-#   2. Serialize to comma-separated string
-#   3. Prompt LLM to continue the sequence
-#   4. Parse, filter, and aggregate N independent forecasts
-#   5. Inverse transform to original scale
+#   1. Normalize the input with a quantile scaler (α=0.95, β=0.3).
+#   2. Serialize it to a comma-separated string.
+#   3. Prompt the LLM to continue the sequence.
+#   4. Parse and filter N independent forecasts, then aggregate them.
+#   5. Inverse transform the result to the original scale.
 #
 # Four filter rules discard invalid forecasts:
 #   (a) Out-of-bounds values
@@ -13,7 +14,7 @@
 #   (c) Flat output (std < 0.001)
 #   (d) Perfectly linear trends (second derivative < 0.005)
 #
-# If all forecasts are filtered, the system falls back to the last observed value (naive baseline).
+# If all forecasts are filtered out, the result is the last observed value (naive baseline).
 
 import logging
 import os
@@ -41,15 +42,15 @@ logger = logging.getLogger(__name__)
 
 # PROMPT TEMPLATES
 
-# System message for API-based models (kept minimal per LLMTime findings)
-# LLMTime paper: "Unlike PromptCast, we show that LLMs can be used directly as 
+# System message for API models. It is kept minimal, following the LLMTime findings.
+# LLMTime paper: "Unlike PromptCast, we show that LLMs can be used directly as
 # forecasters without any added text or prompt engineering"
 SYSTEM_MESSAGE_API = (
     "You continue numerical sequences. Output only numbers separated by commas. "
     "No explanations, no text, just the numbers."
 )
 
-# Enhanced system message for raw/semantic values (70B models)
+# System message for raw (not normalized) values with their meaning kept, used with 70B models
 SYSTEM_MESSAGE_API_SEMANTIC = (
     "You forecast sensor data. Output only the predicted numbers separated by commas. "
     "No explanations or text."
@@ -57,7 +58,7 @@ SYSTEM_MESSAGE_API_SEMANTIC = (
 
 
 # LLM Provider Functions
-# Calls Mistral the API for text completion.
+# Calls the Mistral API for text completion.
 def call_mistral_api(
     prompt: str,
     model: Optional[str] = None,
@@ -117,7 +118,7 @@ def call_groq_api(
         model_name = model or os.getenv("GROQ_MODEL", "llama-3.3-70b-versatile")
         client = Groq(api_key=api_key)
         
-        # Select system message based on use case
+        # Choose the system message for this use case
         system_message = SYSTEM_MESSAGE_API_SEMANTIC if use_semantic_prompt else SYSTEM_MESSAGE_API
         
         logger.debug(f"CALLING GROQ API: MODEL={model_name}, PATHS={num_forecasts}")
@@ -144,7 +145,7 @@ def call_groq_api(
 
 
 # Calls the OpenAI API for text completion.
-# Supports both completion models (gpt-3.5-turbo-instruct) and chat models.
+# Works with completion models (gpt-3.5-turbo-instruct) and with chat models.
 def call_openai_api(
     prompt: str,
     model: Optional[str] = None,
@@ -158,8 +159,8 @@ def call_openai_api(
     
     logger.debug(f"CALLING OPENAI API: MODEL={model_name}, PATHS={num_forecasts}")
     
-    # Use COMPLETION API for instruct models (LLMTime approach - much better!)
-    # Completion models do raw sequence continuation without chat formatting.
+    # Instruct models use the completion API (the LLMTime approach, which works much better).
+    # Completion models continue the raw sequence, without chat formatting.
     if "instruct" in model_name.lower():
         response = openai.completions.create(
             model=model_name,
@@ -170,7 +171,7 @@ def call_openai_api(
         )
         return [choice.text.strip() for choice in response.choices]
     
-    # Fallback to chat API for chat models
+    # Chat models use the chat API
     response = openai.chat.completions.create(
         model=model_name,
         messages=[
@@ -185,7 +186,8 @@ def call_openai_api(
     return [choice.message.content.strip() for choice in response.choices]
 
 
-# Calls local LLM with token control. This is the preferred method as it provides token-level control, ensuring the model outputs only valid numeric sequences.
+# Calls a local LLM with token control. This is the preferred method.
+# It controls which tokens the model may produce, so the output is always a valid numeric sequence.
 def call_local_llm(
     input_str: str,
     settings: SerializerSettings,
@@ -223,7 +225,7 @@ def call_local_llm(
         )
 
 
-# Unified LLM completion interface.
+# One entry point for completions from any provider.
 def call_llm_completion(
     prompt: str,
     settings: SerializerSettings,
@@ -236,7 +238,7 @@ def call_llm_completion(
 ) -> List[str]:
     provider = (provider or os.getenv("LLM_PROVIDER", "mistral")).lower()
     
-    # With prec=3 and integer mode, each value is ~3-4 digits + comma ≈ 5 tokens.
+    # With prec=3 and integer mode, a value is about 3-4 digits plus a comma, roughly 5 tokens.
     avg_tokens_per_step = 5 if settings.use_integers else 7
     max_tokens = int(avg_tokens_per_step * steps * 1.3)
     
@@ -264,11 +266,11 @@ def call_llm_completion(
 
 # Main Forecasting Functions
 
-# Builds the complete prompt for forecasting.
-# LLMTime approach: for base/local models, send ONLY the serialized numbers
-# (the trailing comma signals the model to continue generating).
-# For API chat models, the system message already constrains the output;
-# the user message should contain minimal instruction plus the sequence.
+# Builds the full prompt for forecasting.
+# LLMTime approach for base and local models: send only the serialized numbers.
+# The trailing comma tells the model to keep generating.
+# API chat models: the system message already limits the output.
+# The user message is the sequence plus, at most, a short instruction.
 def build_forecast_prompt(
     serialized_input: str,
     settings: SerializerSettings,
@@ -277,11 +279,11 @@ def build_forecast_prompt(
     horizon: Optional[int] = None,
 ) -> str:
     if is_local:
-        # Local base models: raw sequence only (LLMTime default).
-        # The trailing comma after the last value signals continuation.
+        # Local base models get the raw sequence only (LLMTime default).
+        # The trailing comma after the last value tells the model to continue.
         return serialized_input
 
-    # API chat models: minimal framing to keep the model in numeric mode.
+    # API chat models: as little text as possible, to keep the model writing numbers.
     parts = []
 
     if context:
@@ -293,7 +295,7 @@ def build_forecast_prompt(
     return "\n".join(parts)
 
 
-# Aggregates multiple forecast samples into a single prediction.
+# Combines several forecast samples into one prediction.
 def aggregate_samples(
     samples: List[np.ndarray],
     method: str = "median",
@@ -301,7 +303,7 @@ def aggregate_samples(
     if not samples:
         raise ValueError("NO VALID SAMPLES TO AGGREGATE")
     
-    # Stacks samples into matrix
+    # Stack the samples into a matrix
     sample_matrix = np.stack(samples, axis=0)
     
     if method == "median":
@@ -312,9 +314,11 @@ def aggregate_samples(
         raise ValueError(f"UNKNOWN AGGREGATION METHOD: {method}")
 
 
-# Result of the LLMTime sampling steps: the valid samples on the model's scale (normalized when normalization is
-# used), the scaler that maps them back, the last observed value, and counts of completions, parse failures, samples
-# removed by each filter rule and valid samples.
+# Result of the LLMTime sampling steps. It holds:
+#   - the valid samples on the model's scale (normalized when normalization is used)
+#   - the scaler that maps them back
+#   - the last observed value
+#   - counts of completions, parse failures, samples removed by each filter rule, and valid samples
 @dataclass
 class LLMTimeSamples:
     samples: List[np.ndarray]
@@ -322,14 +326,15 @@ class LLMTimeSamples:
     last_value: float
     counts: Dict[str, int]
 
-    # The median of the valid samples on the original scale (Steps 6-7); use_normalization: the samples are normalized.
+    # The median of the valid samples on the original scale (Steps 6-7).
+    # use_normalization says whether the samples are normalized.
     def point(self, use_normalization: bool) -> np.ndarray:
         median = aggregate_samples(self.samples, method="median")
         return self.scaler.inverse_transform(median) if use_normalization else median
 
 
 # Runs LLMTime steps 1-5 (scale, serialize, prompt, complete, parse and filter) and returns the valid samples.
-# complete: the completion function, called like call_llm_completion (the default).
+# complete is the completion function. It is called like call_llm_completion, which is the default.
 def llmtime_samples(
     series: pd.Series,
     horizon: int,
@@ -347,7 +352,7 @@ def llmtime_samples(
     if len(series) == 0:
         raise ValueError("EMPTY SERIES")
     
-    # Converts to numeric and cleans values
+    # Convert to numbers and drop what cannot be converted
     numeric_series = pd.to_numeric(series, errors="coerce")
     numeric_series = numeric_series.dropna()
     
@@ -362,7 +367,7 @@ def llmtime_samples(
         f"INPUT: {len(values)} POINTS, RANGE [{original_min:.2f}, {original_max:.2f}]"
     )
     
-    # Determines provider and gets appropriate settings
+    # Find the provider and its serializer settings
     provider = (provider or os.getenv("LLM_PROVIDER", "mistral")).lower()
     is_local = provider == "local"
     
@@ -372,7 +377,7 @@ def llmtime_samples(
         is_local=is_local,
     )
     
-    # Step 1: Creates scaler and normalizes values
+    # Step 1: Create the scaler and normalize the values
     if use_normalization:
         scaler = create_scaler(values, alpha=alpha, beta=beta)
         normalized_values = scaler.transform(values)
@@ -386,12 +391,12 @@ def llmtime_samples(
         )
         normalized_values = values
     
-    # Step 2: Serializes input
+    # Step 2: Serialize the input
     serialized_input = serialize_array(normalized_values, settings)
     
     logger.debug(f"SERIALIZED INPUT (FIRST 100 CHARS): {serialized_input[:100]}...")
     
-    # Step 3: Builds context and prompt
+    # Step 3: Build the context and the prompt
     context = None
     if include_context:
         context = build_statistical_context(
@@ -412,8 +417,8 @@ def llmtime_samples(
     
     logger.debug(f"PROMPT LENGTH: {len(prompt)} CHARS")
     
-    # Step 4: Generates completions
-    # Use semantic prompt for API models when using raw values (semantic info preserved)
+    # Step 4: Generate the completions
+    # API models with raw values get the semantic system message, because the raw values keep their meaning
     use_semantic_prompt = (not is_local) and (not use_normalization)
     
     completions = (complete or call_llm_completion)(
@@ -427,24 +432,24 @@ def llmtime_samples(
         use_semantic_prompt=use_semantic_prompt,
     )
     
-    # Step 5: Parses completions with outlier filtering
+    # Step 5: Parse the completions and filter out the invalid ones
     valid_samples = []
     counts = {"completions": len(completions), "parse_failed": 0, "filtered_a": 0, "filtered_b": 0,
               "filtered_c": 0, "filtered_d": 0}
     
-    # Determines bounds based on normalization usage
+    # The bounds depend on whether the values are normalized
     if use_normalization:
-        # For normalized values: should be roughly in [0, 2] range after normalization.
-        # LLMTime uses quantile scaling where α-percentile = 1.0, so values can exceed 1.
-        # Widen bounds to avoid filtering valid extrapolations.
+        # Normalized values should be roughly in [0, 2].
+        # LLMTime scales so the α-percentile is 1.0, so values can exceed 1.
+        # The bounds are wider than that, so valid extrapolations are not filtered.
         min_bound = -2.0
         max_bound = 5.0
         bound_description = "normalized"
     else:
-        # For raw values: use input data range with reasonable buffer
-        # Allow 2x the input range to account for extrapolation
+        # Raw values: the input range plus a buffer.
+        # The buffer is 2x the input range, to allow for extrapolation.
         input_range = original_max - original_min
-        buffer = max(input_range * 2.0, 10.0)  # At least 10 units buffer
+        buffer = max(input_range * 2.0, 10.0)  # but at least 10 units
         min_bound = original_min - buffer
         max_bound = original_max + buffer
         bound_description = f"raw (input range: [{original_min:.2f}, {original_max:.2f}])"
@@ -467,7 +472,7 @@ def llmtime_samples(
             counts["parse_failed"] += 1
             continue
 
-        # --- Filter (a): Out-of-bounds values ---
+        # Filter (a): out-of-bounds values
         if parsed.min() < min_bound or parsed.max() > max_bound:
             logger.warning(
                 f"FORECAST {i+1}: FILTERED (a) out-of-bounds "
@@ -476,19 +481,19 @@ def llmtime_samples(
             counts["filtered_a"] += 1
             continue
 
-        # --- Filter (b): Constant or near-constant output (≤2 unique values) ---
+        # Filter (b): constant or near-constant output (≤2 unique values)
         if len(np.unique(np.round(parsed, 3))) <= 2:
             logger.warning(f"FORECAST {i+1}: FILTERED (b) constant or near-constant (≤2 unique values)")
             counts["filtered_b"] += 1
             continue
 
-        # --- Filter (c): Flat output (std < 0.001) ---
+        # Filter (c): flat output (std < 0.001)
         if float(np.std(parsed)) < 0.001:
             logger.warning(f"FORECAST {i+1}: FILTERED (c) flat output (std < 0.001)")
             counts["filtered_c"] += 1
             continue
 
-        # --- Filter (d): Perfectly linear trends (second derivative < 0.005) ---
+        # Filter (d): perfectly linear trend (second derivative < 0.005)
         if len(parsed) > 4:
             second_diff = np.diff(parsed, 2)
             if np.all(np.abs(second_diff) < 0.005):
@@ -506,7 +511,8 @@ def llmtime_samples(
     return LLMTimeSamples(samples=valid_samples, scaler=scaler, last_value=float(values[-1]), counts=counts)
 
 
-# Generates forecast using LLM with hybrid approach.
+# Forecasts a series with an LLM and returns the point forecast: the median of the valid samples, or the last value
+# when every sample is filtered out.
 def nvp_llms_forecast(
     series: pd.Series,
     horizon: int,
@@ -536,18 +542,18 @@ def nvp_llms_forecast(
     valid_samples = result.samples
     
     if not valid_samples:
-        # Fallback: if all samples filtered, use last value extrapolation
+        # Fallback: if every sample was filtered out, repeat the last value
         logger.warning("ALL SAMPLES FILTERED. USING LAST VALUE FALLBACK.")
         return np.full(horizon, result.last_value)
     
     logger.info(f"VALID FORECASTS AFTER FILTERING: {len(valid_samples)}/{num_forecasts}")
     
-    # Steps 6-7: Aggregates samples and inverses the transform
+    # Steps 6-7: Aggregate the samples and invert the transform
     forecast = result.point(use_normalization)
-    
+
     # Post-processing: clip visitor-type columns to non-negative values.
-    # Visitor counts cannot be negative; the scaler can produce sub-zero values
-    # when the model generates values below the normalized minimum.
+    # Visitor counts cannot be negative, but the scaler can give values below zero
+    # when the model writes values under the normalized minimum.
     _NON_NEGATIVE_COLUMNS = {"visitors_total", "visitor_change", "visitors", "count"}
     if column_name.lower() in _NON_NEGATIVE_COLUMNS:
         forecast = np.clip(forecast, 0, None)
@@ -559,7 +565,7 @@ def nvp_llms_forecast(
     return forecast
 
 
-# Function to forecast from local JSON file.
+# Forecasts from a local JSON file.
 def forecast_from_json(
     json_path: str,
     column_name: str = "temperature",
@@ -599,7 +605,7 @@ def forecast_from_json(
     return forecast, series
 
 
-# Function to forecast from SensBee API.
+# Forecasts from the SensBee API.
 def forecast_from_api(
     sensor_id: str,
     column_name: str = "temperature",

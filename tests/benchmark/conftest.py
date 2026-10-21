@@ -1,6 +1,7 @@
-# Shared helpers for the benchmark tests, as fixtures: synthetic daily-periodic contexts, the deciles of AutoGluon's own
-# wrapper for a model (the cross-check for the zero-shot adapters; needs the bench venv), and the zero-shot forecasters
-# built once per test session.
+# Shared helpers for the benchmark tests, as fixtures:
+# - synthetic daily-periodic contexts
+# - the deciles of AutoGluon's own wrapper for a model (the cross-check for the zero-shot adapters, bench venv only)
+# - the zero-shot forecasters, built once per test session
 
 from pathlib import Path
 
@@ -41,9 +42,9 @@ def _autogluon_deciles(model: str, hyperparameters: dict, contexts: list[pd.Seri
                      for i in range(len(contexts))])
 
 
-# The forecaster and parameters of one zero-shot model (benchmark/models ZERO_SHOT), built once per test session; skips
-# the test when the model's weights aren't in the local Hugging Face cache or its package is missing, so tests never
-# download anything.
+# The forecaster and parameters of one zero-shot model (benchmark/models ZERO_SHOT), built once per test session.
+# Skips the test if the model's weights aren't in the local Hugging Face cache or its package is missing.
+# So no test downloads anything.
 def _zero_shot(name: str) -> tuple:
     from huggingface_hub import try_to_load_from_cache
 
