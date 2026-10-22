@@ -6,10 +6,19 @@ import numpy as np
 import pandas as pd
 import yaml
 
+from benchmark.tasks import QUANTILE_LEVELS
+
 from ..data_access.sensbee_client import load_sensor_series_from_api
 from ..models.nvp_llms import nvp_llms_forecast
+from ..models.tsfm_forecaster import forecast_chronos2
 
 logger = logging.getLogger(__name__)
+
+CHRONOS2_PROVIDER = "chronos-2"
+# Default history per path: LLMs keep the RP's 7 days, Chronos-2 gets the 28 days it was evaluated with.
+DEFAULT_HISTORY_DAYS = {"llm": 7, CHRONOS2_PROVIDER: 28}
+LLM_MAX_HISTORY_DAYS = 14  # the LLM limit before Chronos-2 was added; longer prompts were never tested
+STEPS_PER_HOUR = 4  # the Chronos-2 path always works on the 15-min grid
 # # Loads config (Commented out for now)
 # CONFIG_PATH = os.getenv("FORECAST_CONFIG", "config/forecast_config.yaml")
 
@@ -60,13 +69,41 @@ logger = logging.getLogger(__name__)
 #     return np.array(result["forecast"])
 
 
-# Loads recent data for one sensor column from SensBee and forecasts it with the LLMTime pipeline.
+# Forecasts one sensor column with Chronos-2 (src/models/tsfm_forecaster.py).
+# The median becomes forecast_values, and the deciles and the 80 % interval (q0.1 to q0.9) are added.
+def _forecast_chronos2(sensor_id: str, api_key: Optional[str], column_name: str, horizon_hours: int,
+                       history_days: int) -> dict:
+    result = forecast_chronos2(sensor_id, api_key, column_name, horizon_hours * STEPS_PER_HOUR, history_days)
+    quantiles = result["quantiles"]
+    levels = list(QUANTILE_LEVELS)
+    timestamps = result["timestamps"]
+    return {
+        "column": column_name,
+        "sensor_id": sensor_id,
+        "input_points": result["input_points"],
+        "forecast_points": len(timestamps),
+        "horizon_hours": horizon_hours,
+        "last_data_timestamp": result["last_data_timestamp"],
+        "forecast_start": timestamps[0],
+        "forecast_end": timestamps[-1],
+        "forecast_values": quantiles[:, levels.index(0.5)].tolist(),
+        "forecast_timestamps": timestamps,
+        "forecast_lower": quantiles[:, levels.index(0.1)].tolist(),
+        "forecast_upper": quantiles[:, levels.index(0.9)].tolist(),
+        "forecast_quantiles": {f"{q:g}": quantiles[:, i].tolist() for i, q in enumerate(levels)},
+        "model_info": result["model_info"],
+    }
+
+
+# Loads recent data for one sensor column from SensBee and forecasts it.
+# provider "chronos-2" uses Chronos-2; any other provider uses the LLMTime pipeline.
+# history_days None means the path's default (DEFAULT_HISTORY_DAYS).
 def forecast_single_column(
     sensor_id: str,
     api_key: Optional[str],
     column_name: str,
     horizon_hours: int,
-    history_days: int,
+    history_days: Optional[int],
     provider: Optional[str] = None,
     model: Optional[str] = None,
     num_forecasts: int = 5,
@@ -74,6 +111,17 @@ def forecast_single_column(
     use_normalization: bool = True,
     include_context: bool = False,
 ) -> dict:
+    if provider == CHRONOS2_PROVIDER:
+        history_days = history_days or DEFAULT_HISTORY_DAYS[CHRONOS2_PROVIDER]
+        logger.info(f"FORECASTING {column_name} for sensor {sensor_id} with Chronos-2, "
+                    f"history={history_days}d, horizon={horizon_hours}h")
+        return _forecast_chronos2(sensor_id, api_key, column_name, horizon_hours, history_days)
+
+    history_days = history_days or DEFAULT_HISTORY_DAYS["llm"]
+    if history_days > LLM_MAX_HISTORY_DAYS:
+        raise ValueError(f"history_days={history_days} is too long for LLM providers "
+                         f"(at most {LLM_MAX_HISTORY_DAYS}; up to 28 with provider '{CHRONOS2_PROVIDER}').")
+
     # History window in hours. The SensBee client derives the API limit from it.
     window_hours = history_days * 24
 

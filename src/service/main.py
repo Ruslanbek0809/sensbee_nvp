@@ -36,15 +36,16 @@ class ForecastRequest(BaseModel):
         le=168,
         description="Forecast horizon in hours (6-168)"
     )
-    history_days: int = Field(
-        default=7, 
+    history_days: Optional[int] = Field(
+        default=None,
         ge=1,
-        le=14,
-        description="Days of history to use (1-14)"
+        le=28,
+        description="Days of history to use. LLM providers: 1-14, default 7. 'chronos-2': 1-28, default 28"
     )
     provider: str = Field(
-        default="groq", 
-        description="LLM provider: 'groq', 'openai', 'mistral', or 'local' (GPU required)"
+        default="groq",
+        description="LLM provider: 'groq', 'openai', 'mistral', or 'local' (GPU required). "
+                    "'chronos-2' uses the Chronos-2 time-series model and also returns quantiles"
     )
     model: Optional[str] = Field(
         default=None,
@@ -86,6 +87,12 @@ class ForecastResponse(BaseModel):
     use_normalization: bool = True
     include_context: bool = False
     cached: bool = False
+    # Only for provider "chronos-2" (None otherwise): the 80 % interval (q0.1 and q0.9), every decile by its level
+    # ("0.1" to "0.9"), and the model, recipe and inputs behind the forecast.
+    forecast_lower: Optional[list[float]] = None
+    forecast_upper: Optional[list[float]] = None
+    forecast_quantiles: Optional[dict[str, list[float]]] = None
+    model_info: Optional[dict] = None
 
 
 # In-memory cache of forecast responses.
@@ -149,6 +156,10 @@ async def generate_forecast(request: ForecastRequest) -> ForecastResponse:
             use_normalization=request.use_normalization,
             include_context=request.include_context,
             cached=False,
+            forecast_lower=result.get("forecast_lower"),
+            forecast_upper=result.get("forecast_upper"),
+            forecast_quantiles=result.get("forecast_quantiles"),
+            model_info=result.get("model_info"),
         )
         
         # Cache the response
