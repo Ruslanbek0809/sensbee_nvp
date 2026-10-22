@@ -9,6 +9,9 @@
 # - "stations": a weather station's temperature. Chronos-2 with the other configured stations' temperature as
 #   past covariates, and the time of day and solar elevation as known covariates.
 #   A station that can't be loaded is left out.
+#   The other stations are private and are read with the server's keys, so this recipe is used only when the request
+#   carries the station's own configured READ key. Any other caller gets "plain", so no caller's forecast depends on
+#   sensors their key doesn't open.
 # - "plain": any other sensor or column. Values-only Chronos-2.
 # The inputs follow the benchmark:
 # - The forecast origin is the current 15-min bucket. It is still filling, so it is dropped,
@@ -22,6 +25,7 @@
 # unclipped.
 # torch and chronos-forecasting come from requirements-tsfm.txt and are loaded on the first request.
 
+import hmac
 import logging
 import os
 import threading
@@ -60,11 +64,17 @@ def _sensor_name(sensor_id: str) -> Optional[str]:
 
 
 # Returns the recipe for a sensor and column ("mask", "stations" or "plain"), plus the sensor's configured name.
-def recipe_for(sensor_id: str, column_name: str) -> tuple[str, Optional[str]]:
+# "stations" needs the station's configured READ key in the request (compared in constant time); otherwise "plain".
+def recipe_for(sensor_id: str, column_name: str, api_key: Optional[str]) -> tuple[str, Optional[str]]:
     name = _sensor_name(sensor_id)
     if name is None or TASKS[name].column != column_name:
         return "plain", name
-    return RECIPES.get(TASKS[name].kind, "plain"), name
+    recipe = RECIPES.get(TASKS[name].kind, "plain")
+    if recipe == "stations":
+        configured = (os.getenv(f"{name}_MY_API_KEY_READ") or "").strip()
+        if not configured or not hmac.compare_digest((api_key or "").strip().encode(), configured.encode()):
+            return "plain", name
+    return recipe, name
 
 
 # Returns the Chronos-2 forecaster (the benchmark adapter at the pinned revision). It is loaded on first use and cached.
@@ -132,7 +142,7 @@ def forecast_chronos2(sensor_id: str, api_key: Optional[str], column_name: str, 
                       history_days: int, now: Optional[datetime] = None) -> dict:
     now = now or datetime.now(timezone.utc).replace(tzinfo=None)
     origin = pd.Timestamp(now).floor(STEP)
-    recipe, name = recipe_for(sensor_id, column_name)
+    recipe, name = recipe_for(sensor_id, column_name, api_key)
     context = _load(sensor_id, api_key, column_name, origin, now, history_days)
     if len(context) < 2:
         raise ValueError(f"NOT ENOUGH DATA before {origin} for sensor {sensor_id} ({len(context)} points).")

@@ -1,5 +1,5 @@
 # Tests for src/models/tsfm_forecaster.py without torch or weights:
-# - the recipe per configured sensor
+# - the recipe per configured sensor, and the stations recipe only with the station's own key
 # - the dropped still-filling bucket at the origin
 # - the "0 when closed" mask from the context's own profile
 # - the stations covariates (past columns blanked over the horizon, a station without data left out)
@@ -59,10 +59,10 @@ def _model(calls: list, deciles: Optional[list[float]] = None):
 
 # Runs forecast_chronos2 against the fake server and model.
 def _forecast(values: dict, calls: list, sensor_id: str, column: str, now: datetime, history_days: int = 1,
-              deciles: Optional[list[float]] = None) -> dict:
+              deciles: Optional[list[float]] = None, api_key: str = "read-key") -> dict:
     with patch.object(SensbeeClient, "get_sensor_data", autospec=True, side_effect=_server(values)), \
          patch.object(tsfm, "chronos2_forecaster", autospec=True, return_value=(_model(calls, deciles), {})):
-        return tsfm.forecast_chronos2(sensor_id, "read-key", column, 96, history_days, now=now)
+        return tsfm.forecast_chronos2(sensor_id, api_key, column, 96, history_days, now=now)
 
 
 @pytest.mark.parametrize("sensor_id, column, recipe", [
@@ -71,7 +71,25 @@ def _forecast(values: dict, calls: list, sensor_id: str, column: str, now: datet
     (f"uuid-{STATION}", "humidity", "plain"), ("uuid-PARKPLATZ_EAZ", "Fahrzeuge_auf_Parkplatz", "plain"),
     ("some-other-sensor", "temperature", "plain")])
 def test_the_recipe_follows_the_configured_sensor_and_column(sensor_id, column, recipe):
-    assert tsfm.recipe_for(sensor_id, column)[0] == recipe
+    assert tsfm.recipe_for(sensor_id, column, sensor_id.replace("uuid-", "key-"))[0] == recipe
+
+
+# The other stations are read with the server's keys, so a caller without the station's own key gets "plain".
+@pytest.mark.parametrize("api_key", [None, "", "key-EISHALLE", f"key-{STATION}x"])
+def test_the_stations_recipe_needs_the_stations_own_key(api_key):
+    assert tsfm.recipe_for(f"uuid-{STATION}", "temperature", api_key)[0] == "plain"
+
+
+def test_without_the_stations_key_no_other_station_is_read():
+    calls = []
+    with patch.object(SensbeeClient, "get_sensor_data", autospec=True,
+                      side_effect=_server({f"uuid-{STATION}": lambda t: 1.0, f"uuid-{OTHER}": lambda t: 2.0})) as get, \
+         patch.object(tsfm, "chronos2_forecaster", autospec=True, return_value=(_model(calls), {})):
+        out = tsfm.forecast_chronos2(f"uuid-{STATION}", "another-key", "temperature", 96, 1,
+                                     now=datetime(2026, 2, 10, 10, 7))
+    assert {c.kwargs["sensor_id"] for c in get.call_args_list} == {f"uuid-{STATION}"}
+    ((_, covariates),) = calls
+    assert covariates is None and out["model_info"]["recipe"] == "plain"
 
 
 def test_the_still_filling_bucket_at_the_origin_is_dropped():
@@ -102,7 +120,8 @@ def test_a_station_gets_the_other_stations_as_past_covariates():
     calls = []
     now = datetime(2026, 2, 10, 10, 7)
     out = _forecast({f"uuid-{STATION}": lambda t: 1.0, f"uuid-{OTHER}": lambda t: t.hour + t.minute / 60}, calls,
-                    f"uuid-{STATION}", "temperature", now=now)  # the third station has no data
+                    f"uuid-{STATION}", "temperature", now=now,
+                    api_key=f"key-{STATION}")  # the third station has no data
     ((context,), (window,)), = calls
     column = f"temperature_{OTHER}"
     assert list(window.columns) == [*cov.SUN, column] and window.attrs["future_columns"] == list(cov.SUN)
@@ -119,7 +138,8 @@ def test_an_unconfigured_station_is_left_out_without_a_request(monkeypatch):
     with patch.object(SensbeeClient, "get_sensor_data", autospec=True,
                       side_effect=_server({f"uuid-{STATION}": lambda t: 1.0, f"uuid-{OTHER}": lambda t: 2.0})) as get, \
          patch.object(tsfm, "chronos2_forecaster", autospec=True, return_value=(_model(calls), {})):
-        out = tsfm.forecast_chronos2(f"uuid-{STATION}", "k", "temperature", 96, 1, now=datetime(2026, 2, 10, 10, 7))
+        out = tsfm.forecast_chronos2(f"uuid-{STATION}", f"key-{STATION}", "temperature", 96, 1,
+                                     now=datetime(2026, 2, 10, 10, 7))
     assert {c.kwargs["sensor_id"] for c in get.call_args_list} == {f"uuid-{STATION}", f"uuid-{OTHER}"}
     assert out["model_info"]["stations_left_out"] == [THIRD]
 
