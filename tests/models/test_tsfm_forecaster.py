@@ -3,7 +3,7 @@
 # - the dropped still-filling bucket at the origin
 # - the "0 when closed" mask from the context's own profile
 # - the stations covariates (past columns blanked over the horizon, a station without data left out)
-# - sorted deciles clipped at 0 for visitor columns only
+# - sorted deciles, widened by the recipe's band factor, clipped at 0 for visitor columns only
 # - a clear error when chronos isn't installed
 # Only the SensBee HTTP call and the Chronos-2 builder are patched (autospec). So the real loader, fill rules,
 # covariate window and mask run.
@@ -18,6 +18,7 @@ import pandas as pd
 import pytest
 
 import src.models.tsfm_forecaster as tsfm
+from benchmark.bands import BAND_FACTORS, widen
 from benchmark import covariates as cov
 from benchmark.tasks import QUANTILE_LEVELS, TASKS
 from src.data_access.sensbee_client import SensbeeClient
@@ -144,12 +145,28 @@ def test_an_unconfigured_station_is_left_out_without_a_request(monkeypatch):
     assert out["model_info"]["stations_left_out"] == [THIRD]
 
 
-@pytest.mark.parametrize("column, low", [("visitors_total", 0.0), ("temperature", -9.0)])
-def test_deciles_are_sorted_and_clipped_at_zero_for_visitor_columns_only(column, low):
+@pytest.mark.parametrize("column, low", [("visitors_total", 0.0), ("temperature", -np.inf)])
+def test_deciles_are_sorted_widened_and_clipped_at_zero_for_visitor_columns_only(column, low):
     crossing = [3.0, -9.0, 1.0, 2.0, 4.0, 5.0, 6.0, 8.0, 7.0]
     out = _forecast({"x": lambda t: 1.0}, [], "x", column, now=datetime(2026, 2, 10, 10, 7), deciles=crossing)
-    expected = np.maximum(np.sort(crossing), low)
-    assert np.array_equal(out["quantiles"], np.tile(expected, (96, 1)))
+    factor = BAND_FACTORS["plain"]  # "x" isn't configured, so it gets the plain recipe
+    expected = np.maximum(4.0 + factor * (np.sort(crossing) - 4.0), low)  # the sorted median is 4.0
+    assert factor > 1 and np.allclose(out["quantiles"], np.tile(expected, (96, 1)))
+    assert out["model_info"]["band_factor"] == factor
+
+
+# Each recipe widens by its own factor; the median (the point forecast) stays the model's.
+@pytest.mark.parametrize("sensor_id, column, api_key, recipe", [
+    ("x", "temperature", "k", "plain"),
+    (f"uuid-{STATION}", "temperature", f"key-{STATION}", "stations"),
+    ("uuid-EISHALLE", "visitors_total", "key-EISHALLE", "mask")])
+def test_each_recipe_widens_by_its_own_factor(sensor_id, column, api_key, recipe):
+    deciles = [10.0, 11.0, 12.0, 13.0, 14.0, 15.0, 16.0, 17.0, 18.0]
+    out = _forecast({sensor_id: lambda t: 5.0}, [], sensor_id, column, now=datetime(2026, 2, 9, 12, 7),
+                    deciles=deciles, api_key=api_key)
+    factor = BAND_FACTORS[recipe]
+    assert out["model_info"]["recipe"] == recipe and out["model_info"]["band_factor"] == factor
+    assert np.allclose(out["quantiles"][0], 14.0 + factor * (np.array(deciles) - 14.0))
 
 
 def test_a_non_finite_forecast_is_an_error():
@@ -181,4 +198,4 @@ def test_the_real_chronos2_returns_sorted_finite_deciles():
     assert (np.diff(out["quantiles"], axis=1) >= 0).all() and out["input_points"] == 7 * 96
     forecast, _ = chronos2_forecaster(*CHRONOS2)
     direct, _ = forecast([series.iloc[-7 * 96:]], 96, QUANTILE_LEVELS, 0)
-    assert np.allclose(out["quantiles"], np.sort(direct[0], axis=-1))
+    assert np.allclose(out["quantiles"], widen(direct[0], QUANTILE_LEVELS, BAND_FACTORS["plain"]))

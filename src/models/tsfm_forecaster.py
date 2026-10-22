@@ -21,6 +21,8 @@
 # The model, the mask and the covariate window are the benchmark's own code (benchmark/models,
 # benchmark/covariates.py), so the service runs what was evaluated.
 # Quantiles are sorted (the benchmark sorts crossings for every model).
+# They are then widened around the median by the recipe's factor (benchmark/bands.py), because Chronos-2's raw 80 %
+# band held the truth only about 70-74 % of the time on validation. The median doesn't change.
 # For event-based columns they are also clipped at 0, as the LLMTime path clips them. The benchmark scores them
 # unclipped.
 # torch and chronos-forecasting come from requirements-tsfm.txt and are loaded on the first request.
@@ -37,6 +39,7 @@ import numpy as np
 import pandas as pd
 
 from benchmark import covariates as cov
+from benchmark.bands import BAND_FACTORS, widen
 from benchmark.models import CHRONOS2
 from benchmark.models.chronos_models import chronos2_forecaster
 from benchmark.models.mask_models import recent_mask_forecaster
@@ -137,7 +140,7 @@ def _stations_window(name: str, context: pd.Series, origin: pd.Timestamp, now: d
 # - the forecast timestamps,
 # - the deciles [horizon_steps, 9], sorted and clipped at 0 for event-based columns,
 # - the context's size and last timestamp,
-# - model_info (model, revision, recipe and its settings, origin, context points).
+# - model_info (model, revision, recipe and its settings, band factor, origin, context points).
 def forecast_chronos2(sensor_id: str, api_key: Optional[str], column_name: str, horizon_steps: int,
                       history_days: int, now: Optional[datetime] = None) -> dict:
     now = now or datetime.now(timezone.utc).replace(tzinfo=None)
@@ -170,6 +173,8 @@ def forecast_chronos2(sensor_id: str, api_key: Optional[str], column_name: str, 
     quantiles = np.sort(np.asarray(quantiles, dtype=float)[0], axis=-1)
     if quantiles.shape != (horizon_steps, len(QUANTILE_LEVELS)) or not np.isfinite(quantiles).all():
         raise RuntimeError(f"CHRONOS-2 RETURNED AN INVALID FORECAST (shape {quantiles.shape}).")
+    quantiles = widen(quantiles, QUANTILE_LEVELS, BAND_FACTORS[recipe])
+    info["band_factor"] = BAND_FACTORS[recipe]
     if column_name in EVENT_BASED_COLUMNS:
         quantiles = np.maximum(quantiles, 0.0)
     logger.info(f"CHRONOS-2 FORECAST {recipe} for {column_name}: {len(context)} PTS → {horizon_steps} steps")

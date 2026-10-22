@@ -22,6 +22,8 @@
 # set's kind. The run's model name becomes "<model>+<set>".
 # A "0 when closed" model (MASKED) needs --mask-threshold and a set with the opening profile (cal_open).
 # Its run is named "<model>_t<threshold>+<set>".
+# --band-factor <c> widens every quantile around the median by c (benchmark/bands.py, the service bands). The run
+# name gets "_w<c>" at the end.
 #
 # Usage (from sensbee_nvp/):
 #   venv/bin/python scripts/run_harness.py --snapshot ../../benchmark_data/snapshots/sensbee-2026-10-01 --dry-run
@@ -49,6 +51,7 @@ import pandas as pd
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(PROJECT_ROOT))
 
+from benchmark.bands import widened_forecaster  # noqa: E402
 from benchmark.covariates import COVARIATE_SETS  # noqa: E402
 from benchmark.metrics import METRICS  # noqa: E402
 from benchmark.models import BASELINES, LLMTIME, MASKED, TRAINED, ZERO_SHOT, library_versions  # noqa: E402
@@ -118,6 +121,8 @@ def main() -> None:
                         help="covariate set (only for models that accept its kinds, on sensors of its kind)")
     parser.add_argument("--mask-threshold", type=float,
                         help="'0 when closed' models: forecast 0 where the opening profile is below this share")
+    parser.add_argument("--band-factor", type=float,
+                        help="widen every quantile around the median by this factor (>= 1; the service bands)")
     args = parser.parse_args()
     requested = None if args.contexts is None else tuple(None if c == "all" else int(c) for c in args.contexts)
 
@@ -158,6 +163,12 @@ def main() -> None:
     else:
         forecaster, params = CHECK_FORECASTERS[args.model]
         contexts = requested or CONTEXT_DAYS
+    if args.band_factor is not None:
+        if forecaster is None or args.band_factor < 1:
+            parser.error("--band-factor needs a forecaster (not a trained model) and a factor >= 1")
+        forecaster = widened_forecaster(forecaster, args.band_factor)
+        params = {**params, "band_factor": args.band_factor}
+        name = f"{name}_w{args.band_factor:g}"
     run_dir = run(forecaster, name, args.snapshot, args.out, tasks={sensor: TASKS[sensor] for sensor in args.sensors},
                   period=args.period, context_days=contexts, seed=args.seed, model_params=params,
                   model_info=model_info, trainer=trainer, origin_stride=args.origin_stride,
