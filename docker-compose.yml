@@ -4,6 +4,8 @@ services:
     build:
       context: .
       dockerfile: Dockerfile
+      args:
+        WITH_TSFM: ${WITH_TSFM:-0}  # 1 adds Chronos-2 (provider "chronos-2"): WITH_TSFM=1 docker compose build
     ports:
       - "8000:8000"
     env_file:

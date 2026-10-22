@@ -65,6 +65,9 @@ docker compose down
 # Build and start
 docker compose up -d --build
 
+# Or with Chronos-2 (provider "chronos-2"): adds CPU torch and the model weights to the image
+WITH_TSFM=1 docker compose up -d --build
+
 # View logs
 docker compose logs -f
 
@@ -116,9 +119,9 @@ Service runs at: http://localhost:8000
 `api_key` => READ API key for private sensors (required. Type: string)
 `column` => Column to forecast (e.g., "temperature") (required. Type: string)
 `horizon_hours` => Forecast horizon (6-168 hours) (required. Type: int. Default is 24)
-`history_days` => Days of history to use (1-14 days) (required. Type: int. Default 7)
-`provider` => LLM provider: mistral, groq, openai (required. Type: string. Default is groq)
-`num_samples` => Number of samples (1-20). Higher = better (required. Type: int. Default is 5)
+`history_days` => Days of history to use: 1-14 for LLM providers (default 7), 1-28 for chronos-2 (default 28) (optional. Type: int)
+`provider` => mistral, groq, openai, local, or chronos-2 (required. Type: string. Default is groq)
+`num_forecasts` => Number of LLM forecasts (1-20). Higher = better (required. Type: int. Default is 5)
 `temperature` => LLM temperature (0.1-1.5). Higher = diverse (required. Type: float. Default is 0.9)
 `use_normalization` => Applies LLMTime-style quantile scaling (optional. Type: bool. Default is true)
 `include_context` => Prepends statistical context such as, min, max, trend (optional. Type: bool. Default is false)
@@ -139,6 +142,20 @@ curl -X POST "http://localhost:8000/forecast" \
     "temperature": 0.9
   }'
 ```
+
+### Chronos-2 (`"provider": "chronos-2"`)
+
+Chronos-2 is a pretrained time-series model. It needs `requirements-tsfm.txt` (CPU torch and chronos-forecasting) or the Docker build with `WITH_TSFM=1`; without it the request returns 400. The LLM parameters (`model`, `num_forecasts`, `temperature`, `use_normalization`, `include_context`) don't apply.
+
+- The forecast starts at the current 15-minute slot. That slot is still filling, so it isn't used as input.
+- `forecast_values` is the median. The response also has `forecast_lower` and `forecast_upper` (the 10 % and 90 % quantiles, an 80 % interval), `forecast_quantiles` (all nine deciles, keys "0.1" to "0.9") and `model_info` (model, revision, setup, input points). For LLM providers these fields are `null`.
+- Sensors configured in `.env` (see `.env.example`) get the setup that worked best in the thesis benchmark:
+  - weather stations' `temperature`: the other configured stations' temperature as extra input, only when the request carries the station's own configured READ key;
+  - halls' `visitors_total`: the forecast is 0 in slots where the hall was open on fewer than 30 % of the matching weekdays in the input (the last 28 days by default);
+  - anything else: Chronos-2 on the values alone.
+- Only the 24-hour horizon with 28 days of history was evaluated. Longer horizons work (up to 168 h) but weren't tested.
+- The first request loads the model, so it takes a few seconds longer.
+- The cache keeps the latest forecast per sensor and column, whatever the provider; check `provider` in the cached response.
 
 ## Models Tested
 
