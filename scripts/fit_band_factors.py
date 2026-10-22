@@ -34,7 +34,7 @@ COLUMNS = [f"q{q:g}" for q in QUANTILE_LEVELS]
 
 # The 28-day rows of a run's forecasts.
 def _load(run: Path) -> pd.DataFrame:
-    frame = pd.read_csv(run / "forecasts.csv.gz")
+    frame = pd.read_csv(run / "forecasts.csv.gz", float_precision="round_trip")  # exact floats, as written
     frame = frame[frame["context"] == CONTEXT]
     if frame.empty:
         raise ValueError(f"NO {CONTEXT} FORECASTS in {run}")
