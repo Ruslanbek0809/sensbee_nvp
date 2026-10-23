@@ -5,6 +5,7 @@
 # - the stations covariates (past columns blanked over the horizon, a station without data left out)
 # - sorted deciles, widened by the recipe's band factor, clipped at 0 for visitor columns only
 # - a clear error when chronos isn't installed
+# - the seconds spent loading data and in the model, in model_info
 # Only the SensBee HTTP call and the Chronos-2 builder are patched (autospec). So the real loader, fill rules,
 # covariate window and mask run.
 # The integration test loads the real Chronos-2 (bench venv, weights cached): pytest -m integration.
@@ -199,3 +200,11 @@ def test_the_real_chronos2_returns_sorted_finite_deciles():
     forecast, _ = chronos2_forecaster(*CHRONOS2)
     direct, _ = forecast([series.iloc[-7 * 96:]], 96, QUANTILE_LEVELS, 0)
     assert np.allclose(out["quantiles"], widen(direct[0], QUANTILE_LEVELS, BAND_FACTORS["plain"]))
+
+
+# The clock reads 10.0 at the start, 12.5 after loading, 13.0 when the model call starts (after any wait for the lock)
+# and 14.25 after it: 2.5 s of data loading, 1.25 s in the model.
+def test_model_info_splits_the_seconds_into_data_and_model():
+    with patch.object(tsfm, "perf_counter", autospec=True, side_effect=[10.0, 12.5, 13.0, 14.25]):
+        out = _forecast({"x": lambda t: 1.0}, [], "x", "temperature", now=datetime(2026, 2, 10, 10, 7))
+    assert out["model_info"]["seconds"] == {"data": 2.5, "model": 1.25}

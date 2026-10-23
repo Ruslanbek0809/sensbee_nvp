@@ -32,6 +32,7 @@ import logging
 import os
 import threading
 from datetime import datetime, timedelta, timezone
+from time import perf_counter
 from typing import Optional
 
 import httpx
@@ -140,9 +141,11 @@ def _stations_window(name: str, context: pd.Series, origin: pd.Timestamp, now: d
 # - the forecast timestamps,
 # - the deciles [horizon_steps, 9], sorted and clipped at 0 for event-based columns,
 # - the context's size and last timestamp,
-# - model_info (model, revision, recipe and its settings, band factor, origin, context points).
+# - model_info (model, revision, recipe and its settings, band factor, origin, context points, and the seconds spent
+#   loading data from SensBee and in the model call, without waiting for the lock).
 def forecast_chronos2(sensor_id: str, api_key: Optional[str], column_name: str, horizon_steps: int,
                       history_days: int, now: Optional[datetime] = None) -> dict:
+    started = perf_counter()
     now = now or datetime.now(timezone.utc).replace(tzinfo=None)
     origin = pd.Timestamp(now).floor(STEP)
     recipe, name = recipe_for(sensor_id, column_name, api_key)
@@ -157,7 +160,9 @@ def forecast_chronos2(sensor_id: str, api_key: Optional[str], column_name: str, 
         window, info["covariate_stations"], info["stations_left_out"] = _stations_window(
             name, context, origin, now, history_days, horizon_steps)
 
+    loaded = perf_counter()
     with _lock:
+        model_started = perf_counter()
         forecast, _ = _chronos2()
         if recipe == "mask":
             masked, _ = recent_mask_forecaster(lambda: (forecast, {}), THRESHOLD, "chronos2")
@@ -166,6 +171,7 @@ def forecast_chronos2(sensor_id: str, api_key: Optional[str], column_name: str, 
             quantiles, _ = forecast([context], horizon_steps, QUANTILE_LEVELS, 0, covariates=[window])
         else:
             quantiles, _ = forecast([context], horizon_steps, QUANTILE_LEVELS, 0)
+    info["seconds"] = {"data": round(loaded - started, 3), "model": round(perf_counter() - model_started, 3)}
     if recipe == "mask":
         closed = cov.open_share(timestamps, cov.series_open_profile(context)) < THRESHOLD
         info.update({"threshold": THRESHOLD, "masked_steps": int(closed.sum())})
