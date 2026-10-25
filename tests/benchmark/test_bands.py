@@ -1,13 +1,14 @@
 # Tests for benchmark/bands.py with hand-checked numbers:
 # - widen() keeps the median and the order, sorts crossings first, and c = 1 changes nothing;
-# - coverage80() counts q0.1 <= y <= q0.9;
+# - coverage80() (benchmark/metrics.py) counts q0.1 <= y <= q0.9;
 # - fit_factor() finds a known factor and ignores [0, 0] bands;
 # - widened_forecaster() widens a forecaster's output and passes covariates through.
 
 import numpy as np
 import pytest
 
-from benchmark.bands import BAND_FACTORS, FIT_GRID, coverage80, fit_factor, widen, widened_forecaster
+from benchmark.bands import BAND_FACTORS, FIT_GRID, fit_factor, widen, widened_forecaster
+from benchmark.metrics import coverage80
 from benchmark.tasks import QUANTILE_LEVELS
 
 DECILES = np.array([[1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0, 9.0]])  # median 5

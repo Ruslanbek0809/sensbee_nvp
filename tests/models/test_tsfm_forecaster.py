@@ -6,10 +6,12 @@
 # - sorted deciles, widened by the recipe's band factor, clipped at 0 for visitor columns only
 # - a clear error when chronos isn't installed
 # - the seconds spent loading data and in the model, in model_info
+# - the station loads run at the same time; model_info says whether the history is the evaluated 28 days
 # Only the SensBee HTTP call and the Chronos-2 builder are patched (autospec). So the real loader, fill rules,
 # covariate window and mask run.
 # The integration test loads the real Chronos-2 (bench venv, weights cached): pytest -m integration.
 
+import threading
 from datetime import datetime
 from typing import Callable, Optional
 from unittest.mock import patch
@@ -144,6 +146,31 @@ def test_an_unconfigured_station_is_left_out_without_a_request(monkeypatch):
                                      now=datetime(2026, 2, 10, 10, 7))
     assert {c.kwargs["sensor_id"] for c in get.call_args_list} == {f"uuid-{STATION}", f"uuid-{OTHER}"}
     assert out["model_info"]["stations_left_out"] == [THIRD]
+
+
+# The target and the other two stations are loaded at the same time: each fake request waits until all three have
+# started, so loading them one after another breaks the barrier.
+def test_a_stations_forecast_loads_the_three_stations_at_the_same_time():
+    barrier = threading.Barrier(3, timeout=2)
+    serve = _server({f"uuid-{STATION}": lambda t: 1.0, f"uuid-{OTHER}": lambda t: 2.0, f"uuid-{THIRD}": lambda t: 3.0})
+
+    def get_sensor_data(*args, **kwargs):
+        barrier.wait()
+        return serve(*args, **kwargs)
+
+    with patch.object(SensbeeClient, "get_sensor_data", autospec=True, side_effect=get_sensor_data), \
+         patch.object(tsfm, "chronos2_forecaster", autospec=True, return_value=(_model([]), {})):
+        out = tsfm.forecast_chronos2(f"uuid-{STATION}", f"key-{STATION}", "temperature", 96, 1,
+                                     now=datetime(2026, 2, 10, 10, 7))
+    assert out["model_info"]["covariate_stations"] == [OTHER, THIRD]
+
+
+# The recipes and band factors were evaluated with 28 days of history; model_info says whether a request used that.
+@pytest.mark.parametrize("history_days, evaluated", [(28, True), (7, False)])
+def test_model_info_says_whether_the_history_is_the_evaluated_one(history_days, evaluated):
+    out = _forecast({"x": lambda t: 1.0}, [], "x", "temperature", now=datetime(2026, 2, 10, 10, 7),
+                    history_days=history_days)
+    assert out["model_info"]["evaluated_history"] is evaluated
 
 
 @pytest.mark.parametrize("column, low", [("visitors_total", 0.0), ("temperature", -np.inf)])

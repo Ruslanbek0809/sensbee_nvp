@@ -11,6 +11,8 @@ from typing import Callable
 
 import numpy as np
 
+from benchmark.metrics import coverage80
+
 # Fitted on validation (28-day context, all 96 steps, bands other than [0, 0]); fit output in the thesis root:
 # benchmark_data/spikes/2026-10-22T215830Z_phase5_5.4_bands/band_factors.csv. Validation COV80 goes from
 # 0.706 / 0.720 / 0.739 to about 0.80.
@@ -27,16 +29,16 @@ def widen(quantiles: np.ndarray, levels: tuple[float, ...], factor: float) -> np
     return median + factor * (ordered - median)
 
 
-# The share of rows with q_0.1 <= y <= q_0.9 (COV80, as in benchmark/metrics.py) for quantiles [rows, levels].
-def coverage80(y: np.ndarray, quantiles: np.ndarray, levels: tuple[float, ...]) -> float:
-    low, high = quantiles[:, list(levels).index(0.1)], quantiles[:, list(levels).index(0.9)]
-    return float(np.mean((low <= y) & (y <= high)))
+# The rows of quantiles [rows, levels] whose band isn't [0, 0] (every quantile 0, e.g. a masked closed slot).
+# No factor changes a [0, 0] band, so the fit leaves those rows out.
+def nonzero_bands(quantiles: np.ndarray) -> np.ndarray:
+    return ~(quantiles == 0).all(axis=1)
 
 
 # The factor on FIT_GRID whose widened COV80 is closest to 0.80 (ties: the smaller factor), with that coverage.
-# Rows whose band is [0, 0] (every quantile 0, e.g. a masked closed slot) are left out: no factor changes them.
+# Only the rows with nonzero_bands are fitted.
 def fit_factor(y: np.ndarray, quantiles: np.ndarray, levels: tuple[float, ...]) -> tuple[float, float]:
-    keep = ~(quantiles == 0).all(axis=1)
+    keep = nonzero_bands(quantiles)
     y, quantiles = y[keep], quantiles[keep]
     covered = [coverage80(y, widen(quantiles, levels, c), levels) for c in FIT_GRID]
     best = int(np.argmin(np.abs(np.array(covered) - 0.80)))  # argmin takes the first, i.e. the smaller factor

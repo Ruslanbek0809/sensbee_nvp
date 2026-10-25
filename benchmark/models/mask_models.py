@@ -45,9 +45,15 @@ def mask_forecaster(base_build: Callable, threshold: float, base_model: str):
                       "base_model": base_model}
 
 
+# The horizon steps that the recent rule sets to 0: where the context's own opening profile (series_open_profile),
+# looked up at the horizon's timestamps (which follow the context's last step), is below the threshold.
+def closed_steps(context: pd.Series, horizon: int, threshold: float) -> np.ndarray:
+    future = pd.date_range(context.index[-1] + STEP, periods=horizon, freq=STEP)
+    return open_share(future, series_open_profile(context)) < threshold
+
+
 # Wraps a base builder (→ forecaster, parameters) into a masked forecaster whose opening profile is computed from each
-# context (series_open_profile).
-# The profile is looked up at the horizon's timestamps, which follow the context's last step.
+# context (closed_steps).
 # Returns it with its parameters (as mask_forecaster, plus where the profile comes from).
 def recent_mask_forecaster(base_build: Callable, threshold: float, base_model: str):
     base, base_params = base_build()
@@ -57,9 +63,7 @@ def recent_mask_forecaster(base_build: Callable, threshold: float, base_model: s
         quantiles, status = base(contexts, horizon, levels, seed)
         quantiles = np.array(quantiles, dtype=float)
         for i, context in enumerate(contexts):
-            future = pd.date_range(context.index[-1] + STEP, periods=horizon, freq=STEP)
-            closed = open_share(future, series_open_profile(context)) < threshold
-            quantiles[i, closed, :] = 0.0
+            quantiles[i, closed_steps(context, horizon, threshold), :] = 0.0
         return quantiles, list(status)
 
     return forecast, {"base": base_params, "rule": "every quantile = 0 where open_share < threshold",

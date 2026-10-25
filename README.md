@@ -154,8 +154,8 @@ Chronos-2 is a pretrained time-series model. It needs `requirements-tsfm.txt` (C
   - halls' `visitors_total`: the forecast is 0 in slots where the hall was open on fewer than 30 % of the matching weekdays in the input (the last 28 days by default);
   - anything else: Chronos-2 on the values alone.
 - The quantiles are widened around the median by a factor per setup (1.12 to 1.20, `benchmark/bands.py`), because Chronos-2's raw 80 % interval held the truth only about 70-74 % of the time on validation data. The factors were fitted for 28 days of history; the median doesn't change. `model_info.band_factor` reports the factor used.
-- Only the 24-hour horizon with 28 days of history was evaluated. Longer horizons work (up to 168 h) but weren't tested.
-- The first request loads the model, so it takes a few seconds longer.
+- Only the 24-hour horizon with 28 days of history was evaluated. Longer horizons work (up to 168 h) but weren't tested. `model_info.evaluated_history` is `false` when a request uses another history length, for which the setups and bands aren't calibrated.
+- When chronos-forecasting is installed, the service loads the model at startup, so the service takes a few seconds longer to start and no request waits for it. For a weather station, the other stations are loaded at the same time as the station itself.
 - The cache keeps the latest forecast per sensor and column, whatever the provider; check `provider` in the cached response.
 
 ## Models Tested

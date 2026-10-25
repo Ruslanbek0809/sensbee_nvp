@@ -167,7 +167,8 @@ def main() -> None:
         if forecaster is None or args.band_factor < 1:
             parser.error("--band-factor needs a forecaster (not a trained model) and a factor >= 1")
         forecaster = widened_forecaster(forecaster, args.band_factor)
-        params = {**params, "band_factor": args.band_factor}
+        # base_model: the report tests a widened run against its raw run
+        params = {**params, "band_factor": args.band_factor, "base_model": name}
         name = f"{name}_w{args.band_factor:g}"
     run_dir = run(forecaster, name, args.snapshot, args.out, tasks={sensor: TASKS[sensor] for sensor in args.sensors},
                   period=args.period, context_days=contexts, seed=args.seed, model_params=params,

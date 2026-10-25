@@ -16,7 +16,8 @@
 # failures.csv still counts each run's own origins.
 # Covariate runs (Phase 4) are named "<model>+<set>" and cover one sensor group.
 # So the skill is also given per group (halls, weather), next to the main 5-sensor skill.
-# dm_base.csv tests each covariate run against its own values-only run ("<model>") on the same origins and context.
+# dm_base.csv tests each covariate run against its own values-only run ("<model>") on the same origins and context
+# (and each widened run against its raw run, dm_base).
 # Oracle runs (observed future covariates, run.json covariates.oracle) are upper bounds.
 # They get their own section in summary.md, apart from every other model.
 
@@ -200,16 +201,21 @@ def dm_tests(metrics: pd.DataFrame, records: dict[str, dict], reference: tuple[s
 # Diebold–Mariano tests of each covariate run "<model>+<set>" against its base run, when both are in the report.
 # The test is per sensor, loss and horizon, at the same context.
 # The base run is the values-only run "<model>", or the run named in model_params.base_model
-# (a "0 when closed" run against its unmasked base, with or without a covariate set).
-# A negative statistic means the covariates (or the mask) lower the loss.
+# (a "0 when closed" run against its unmasked base, with or without a covariate set; a widened run "<run>_w<c>"
+# against its raw run "<run>"). A widened run is tested on QL only: widening keeps the median, so its MAE equals the
+# raw run's.
+# A negative statistic means the covariates (or the mask, or the widening) lower the loss.
 def dm_base(metrics: pd.DataFrame, records: dict[str, dict]) -> pd.DataFrame:
     out = []
     for model in records:
         base = records[model].get("model_params", {}).get("base_model") or model.split("+")[0]
         if base == model or base not in records:
             continue
+        widened = "band_factor" in records[model].get("model_params", {})
         for loss in ("MAE", "QL"):
             if loss == "QL" and (_point_only(records[model]) or _point_only(records[base])):
+                continue
+            if loss == "MAE" and widened:
                 continue
             for h in REPORT_STEPS:
                 for context in metrics.loc[metrics["model"] == model, "context"].unique():

@@ -39,10 +39,17 @@ def quantile_loss(y: np.ndarray, quantiles: np.ndarray, levels: tuple[float, ...
     return (2 * np.maximum(tau * errors, (tau - 1) * errors)).mean(axis=1)
 
 
+# COV80: the share of rows with q̂_0.1 ≤ y ≤ q̂_0.9, for y [rows] and quantiles [rows, levels].
+def coverage80(y: np.ndarray, quantiles: np.ndarray, levels: tuple[float, ...]) -> float:
+    levels = tuple(levels)
+    low, high = quantiles[:, levels.index(0.1)], quantiles[:, levels.index(0.9)]
+    return float(np.mean((low <= y) & (y <= high)))
+
+
 # Metrics of one origin on the first h steps, for each h in `steps`:
 # - MAE, RMSE and MASE of the median forecast;
 # - QL, the quantile loss, and SQL = QL / scale;
-# - COV80, the share of steps with q̂_0.1 ≤ y ≤ q̂_0.9.
+# - COV80 (coverage80).
 # A NaN scale gives NaN MASE and SQL.
 def window_metrics(y: np.ndarray, quantiles: np.ndarray, levels: tuple[float, ...], scale: float,
                    steps: tuple[int, ...]) -> list[dict]:
@@ -50,7 +57,6 @@ def window_metrics(y: np.ndarray, quantiles: np.ndarray, levels: tuple[float, ..
     y = np.asarray(y, dtype=float)
     quantiles = np.asarray(quantiles, dtype=float)
     median = quantiles[:, levels.index(0.5)]
-    low, high = quantiles[:, levels.index(0.1)], quantiles[:, levels.index(0.9)]
     loss = quantile_loss(y, quantiles, levels)
     rows = []
     for h in steps:
@@ -64,7 +70,7 @@ def window_metrics(y: np.ndarray, quantiles: np.ndarray, levels: tuple[float, ..
             "MASE": mae / scale,
             "QL": ql,
             "SQL": ql / scale,
-            "COV80": float(np.mean((low[:h] <= y[:h]) & (y[:h] <= high[:h]))),
+            "COV80": coverage80(y[:h], quantiles[:h], levels),
         })
     return rows
 

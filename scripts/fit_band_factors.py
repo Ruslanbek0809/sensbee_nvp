@@ -23,19 +23,19 @@ import pandas as pd
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(PROJECT_ROOT))
 
-from benchmark.bands import FIT_GRID, coverage80, fit_factor, widen  # noqa: E402
+from benchmark.bands import BAND_FACTORS, FIT_GRID, fit_factor, nonzero_bands, widen  # noqa: E402
+from benchmark.metrics import coverage80  # noqa: E402
+from benchmark.report import QUANTILE_COLUMNS as COLUMNS  # noqa: E402
 from benchmark.snapshot import git_state, sha256_file  # noqa: E402
-from benchmark.tasks import QUANTILE_LEVELS  # noqa: E402
+from benchmark.tasks import QUANTILE_LEVELS, REPORT_STEPS  # noqa: E402
 
 CONTEXT = "28d"
-HORIZONS = (4, 24, 96)
-COLUMNS = [f"q{q:g}" for q in QUANTILE_LEVELS]
 
 
-# The 28-day rows of a run's forecasts.
+# The 28-day rows of a run's forecasts, without failed origins (as the report leaves them out).
 def _load(run: Path) -> pd.DataFrame:
     frame = pd.read_csv(run / "forecasts.csv.gz", float_precision="round_trip")  # exact floats, as written
-    frame = frame[frame["context"] == CONTEXT]
+    frame = frame[(frame["context"] == CONTEXT) & (frame["status"] != "failed")]
     if frame.empty:
         raise ValueError(f"NO {CONTEXT} FORECASTS in {run}")
     return frame
@@ -45,7 +45,7 @@ def _load(run: Path) -> pd.DataFrame:
 def _coverages(frame: pd.DataFrame, factor: float) -> dict:
     y, raw = frame["y"].to_numpy(), frame[COLUMNS].to_numpy()
     wide = widen(raw, QUANTILE_LEVELS, factor)
-    fitted = ~(raw == 0).all(axis=1)
+    fitted = nonzero_bands(raw)
     return {"rows": len(frame), "fitted_rows": int(fitted.sum()),
             "cov80_before": coverage80(y[fitted], raw[fitted], QUANTILE_LEVELS),
             "cov80_after": coverage80(y[fitted], wide[fitted], QUANTILE_LEVELS),
@@ -55,12 +55,12 @@ def _coverages(frame: pd.DataFrame, factor: float) -> dict:
 
 def main() -> None:
     parser = argparse.ArgumentParser(description="Fit the band-widening factors on validation runs (no network)")
-    for recipe in ("plain", "stations", "mask"):
+    for recipe in BAND_FACTORS:
         parser.add_argument(f"--{recipe}", type=Path, required=True, help=f"validation run folder for '{recipe}'")
     parser.add_argument("--out", type=Path, required=True, help="parent folder; a new <UTC> folder is created")
     args = parser.parse_args()
 
-    runs = {"plain": args.plain, "stations": args.stations, "mask": args.mask}
+    runs = {recipe: getattr(args, recipe) for recipe in BAND_FACTORS}
     summary, detail, inputs = [], [], {}
     for recipe, run in runs.items():
         meta = json.loads((run / "run.json").read_text())
@@ -71,7 +71,7 @@ def main() -> None:
         summary.append({"recipe": recipe, "factor": factor, "at_grid_edge": factor in (FIT_GRID[0], FIT_GRID[-1]),
                         **_coverages(frame, factor)})
         for sensor, rows in frame.groupby("sensor"):
-            for h in HORIZONS:
+            for h in REPORT_STEPS:
                 detail.append({"recipe": recipe, "sensor": sensor, "horizon_steps": h,
                                **_coverages(rows[rows["step"] <= h], factor)})
         inputs[recipe] = {"run": run.name, "model": meta.get("model"),
@@ -81,8 +81,8 @@ def main() -> None:
     out.mkdir(parents=True)
     pd.DataFrame(summary).to_csv(out / "band_factors.csv", index=False)
     pd.DataFrame(detail).to_csv(out / "coverage_detail.csv", index=False)
-    (out / "run.json").write_text(json.dumps({"inputs": inputs, "context": CONTEXT, "target": 0.80,
-                                              "grid": [float(FIT_GRID[0]), float(FIT_GRID[-1]), 0.01],
+    grid = [float(FIT_GRID[0]), float(FIT_GRID[-1]), round(float(FIT_GRID[1] - FIT_GRID[0]), 2)]  # first, last, step
+    (out / "run.json").write_text(json.dumps({"inputs": inputs, "context": CONTEXT, "target": 0.80, "grid": grid,
                                               "code": git_state()}, indent=2))
     with pd.option_context("display.width", 200):
         print(pd.DataFrame(summary).round(4).to_string(index=False))

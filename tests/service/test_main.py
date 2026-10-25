@@ -1,6 +1,6 @@
-# Tests for the /forecast endpoint through FastAPI's TestClient: request validation, the new Chronos-2 fields, and
-# the unchanged LLM response. The real forecast_single_column runs; only the SensBee loader, the LLM call and the
-# Chronos-2 forecaster are patched (autospec), so no network, model or paid API is used.
+# Tests for the /forecast endpoint through FastAPI's TestClient: request validation, the new Chronos-2 fields, the
+# unchanged LLM response, and the model preload at startup. The real forecast_single_column runs; only the SensBee
+# loader, the LLM call and the Chronos-2 forecaster are patched (autospec), so no network, model or paid API is used.
 
 from unittest.mock import patch
 
@@ -121,3 +121,14 @@ def test_chronos2_without_its_install_is_a_bad_request():
         response = _post(provider="chronos-2")
 
     assert response.status_code == 400 and "NOT INSTALLED" in response.json()["detail"]
+
+
+# With chronos-forecasting installed (the WITH_TSFM build) the model is loaded once at startup; without it, never.
+@pytest.mark.parametrize("installed", [True, False])
+def test_startup_preloads_chronos2_only_when_installed(monkeypatch, installed):
+    monkeypatch.setattr(tsfm, "_model", None)
+    with patch("src.service.main.find_spec", autospec=True, return_value=object() if installed else None), \
+         patch.object(tsfm, "chronos2_forecaster", autospec=True, return_value=(lambda *args: None, {})) as build:
+        with TestClient(app):
+            pass
+    assert build.call_count == (1 if installed else 0)

@@ -6,19 +6,21 @@ import numpy as np
 import pandas as pd
 import yaml
 
-from benchmark.tasks import QUANTILE_LEVELS
+from benchmark.tasks import QUANTILE_LEVELS, STEP
 
 from ..data_access.sensbee_client import load_sensor_series_from_api
 from ..models.nvp_llms import nvp_llms_forecast
-from ..models.tsfm_forecaster import forecast_chronos2
+from ..models.tsfm_forecaster import EVALUATED_HISTORY_DAYS, forecast_chronos2
 
 logger = logging.getLogger(__name__)
 
 CHRONOS2_PROVIDER = "chronos-2"
-# Default history per path: LLMs keep the RP's 7 days, Chronos-2 gets the 28 days it was evaluated with.
-DEFAULT_HISTORY_DAYS = {"llm": 7, CHRONOS2_PROVIDER: 28}
+# Default history per path: LLMs keep the RP's 7 days, Chronos-2 gets the 28 days it was evaluated with (also the
+# API's maximum, main.py).
+LLM_DEFAULT_HISTORY_DAYS = 7
+CHRONOS2_HISTORY_DAYS = EVALUATED_HISTORY_DAYS
 LLM_MAX_HISTORY_DAYS = 14  # the LLM limit before Chronos-2 was added; longer prompts were never tested
-STEPS_PER_HOUR = 4  # the Chronos-2 path always works on the 15-min grid
+STEPS_PER_HOUR = pd.Timedelta(hours=1) // STEP  # the Chronos-2 path always works on the 15-min grid
 # # Loads config (Commented out for now)
 # CONFIG_PATH = os.getenv("FORECAST_CONFIG", "config/forecast_config.yaml")
 
@@ -97,7 +99,7 @@ def _forecast_chronos2(sensor_id: str, api_key: Optional[str], column_name: str,
 
 # Loads recent data for one sensor column from SensBee and forecasts it.
 # provider "chronos-2" uses Chronos-2; any other provider uses the LLMTime pipeline.
-# history_days None means the path's default (DEFAULT_HISTORY_DAYS).
+# history_days None means the path's default (LLM_DEFAULT_HISTORY_DAYS or CHRONOS2_HISTORY_DAYS).
 def forecast_single_column(
     sensor_id: str,
     api_key: Optional[str],
@@ -112,15 +114,15 @@ def forecast_single_column(
     include_context: bool = False,
 ) -> dict:
     if provider == CHRONOS2_PROVIDER:
-        history_days = history_days or DEFAULT_HISTORY_DAYS[CHRONOS2_PROVIDER]
+        history_days = history_days or CHRONOS2_HISTORY_DAYS
         logger.info(f"FORECASTING {column_name} for sensor {sensor_id} with Chronos-2, "
                     f"history={history_days}d, horizon={horizon_hours}h")
         return _forecast_chronos2(sensor_id, api_key, column_name, horizon_hours, history_days)
 
-    history_days = history_days or DEFAULT_HISTORY_DAYS["llm"]
+    history_days = history_days or LLM_DEFAULT_HISTORY_DAYS
     if history_days > LLM_MAX_HISTORY_DAYS:
         raise ValueError(f"history_days={history_days} is too long for LLM providers "
-                         f"(at most {LLM_MAX_HISTORY_DAYS}; up to 28 with provider '{CHRONOS2_PROVIDER}').")
+                         f"(at most {LLM_MAX_HISTORY_DAYS}; up to {CHRONOS2_HISTORY_DAYS} with provider '{CHRONOS2_PROVIDER}').")
 
     # History window in hours. The SensBee client derives the API limit from it.
     window_hours = history_days * 24

@@ -3,13 +3,16 @@
 
 import asyncio
 import logging
+from contextlib import asynccontextmanager
 from datetime import datetime
+from importlib.util import find_spec
 from typing import Optional
 
 from fastapi import FastAPI, HTTPException
 from pydantic import BaseModel, Field
 
-from .forecast_jobs import forecast_single_column
+from ..models.tsfm_forecaster import preload
+from .forecast_jobs import CHRONOS2_HISTORY_DAYS, forecast_single_column
 
 # Configure logging
 logging.basicConfig(level=logging.INFO)
@@ -39,7 +42,7 @@ class ForecastRequest(BaseModel):
     history_days: Optional[int] = Field(
         default=None,
         ge=1,
-        le=28,
+        le=CHRONOS2_HISTORY_DAYS,
         description="Days of history to use. LLM providers: 1-14, default 7. 'chronos-2': 1-28, default 28"
     )
     provider: str = Field(
@@ -103,10 +106,21 @@ def build_cache_key(sensor_id: str, column: str) -> str:
     return f"{sensor_id}_{column}"
 
 
+# Loads Chronos-2 before the service accepts requests when chronos-forecasting is installed (the WITH_TSFM build), so
+# the first chronos-2 request doesn't wait for it. Without it the service starts as before.
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    if find_spec("chronos") is not None:
+        await asyncio.to_thread(preload)
+        logger.info("PRELOADED Chronos-2 at startup")
+    yield
+
+
 app = FastAPI(
     title="SensBee NVP Service",
     description=("On-demand next-value prediction service for smart city sensor data. It uses LLM-based forecasting to predict future sensor values."),
     version="0.2.0",
+    lifespan=lifespan,
 )
 
 ### API Endpoints

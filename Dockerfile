@@ -4,13 +4,11 @@
 # chronos-forecasting (requirements-tsfm.txt) and downloads the Chronos-2 weights at the pinned revision, so the
 # container runs offline (HF_HUB_OFFLINE=1). The default build is as before.
 # CHRONOS2_REVISION must equal CHRONOS2 in benchmark/models/__init__.py (tests/service/test_packaging.py checks it).
-# The weights are downloaded before the code is copied, so a code change doesn't download them again.
+# The weights are downloaded before the code is copied, so a code change doesn't download them again. Each build arg is
+# declared just before the first layer that uses it, so changing it (or requirements-tsfm.txt) rebuilds only the layers
+# from there on: a new revision downloads only the weights again.
 
 FROM python:3.13-slim
-
-ARG WITH_TSFM=0
-ARG CHRONOS2_MODEL=amazon/chronos-2
-ARG CHRONOS2_REVISION=29ec3766d36d6f73f0696f85560a422f50e8498c
 
 WORKDIR /app
 
@@ -24,13 +22,17 @@ RUN useradd -m -u 1000 appuser && mkdir -p /app/hf-cache && chown appuser:appuse
 ENV HF_HOME=/app/hf-cache
 
 # Copies requirements first and installs Python packages, with the versions in constraints.txt
-COPY requirements.txt requirements-tsfm.txt constraints.txt ./
+COPY requirements.txt constraints.txt ./
 RUN pip install --no-cache-dir -r requirements.txt -c constraints.txt
+ARG WITH_TSFM=0
+COPY requirements-tsfm.txt ./
 RUN if [ "$WITH_TSFM" = "1" ]; then pip install --no-cache-dir -r requirements-tsfm.txt; fi
 
 # Downloads the Chronos-2 weights (TSFM build only), then turns the Hugging Face Hub offline (TSFM build only:
 # HF_HUB_OFFLINE=0 is off)
 USER appuser
+ARG CHRONOS2_MODEL=amazon/chronos-2
+ARG CHRONOS2_REVISION=29ec3766d36d6f73f0696f85560a422f50e8498c
 RUN if [ "$WITH_TSFM" = "1" ]; then \
     python -c "from huggingface_hub import snapshot_download; snapshot_download('$CHRONOS2_MODEL', revision='$CHRONOS2_REVISION')"; \
     fi

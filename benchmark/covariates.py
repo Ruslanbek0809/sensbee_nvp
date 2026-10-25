@@ -100,6 +100,12 @@ def _time_of_day(local: pd.DatetimeIndex) -> tuple[np.ndarray, np.ndarray]:
     return np.sin(tod), np.cos(tod)
 
 
+# The "sun" group's columns (SUN) for naive-UTC timestamps: time of day in Berlin and solar elevation.
+def sun_columns(index: pd.DatetimeIndex) -> dict[str, np.ndarray]:
+    tod_sin, tod_cos = _time_of_day(berlin(index))
+    return {"tod_sin": tod_sin, "tod_cos": tod_cos, "solar_elevation": solar_elevation(index)}
+
+
 # Calendar features in Berlin time: time of day and weekday as sin/cos, plus the public and school holiday flags
 # of the local date. Raises when a timestamp's local date lies outside the holiday table.
 def calendar(index: pd.DatetimeIndex) -> pd.DataFrame:
@@ -187,8 +193,7 @@ def build(name: str, sensor: str, frames: dict[str, pd.DataFrame], series: pd.Se
             columns["open_share"], kinds["open_share"] = open_share(index, profile), GROUP_KINDS[group]
             info["open_profile"] = np.round(profile, 4).tolist()
         elif group == "sun":
-            columns["tod_sin"], columns["tod_cos"] = _time_of_day(berlin(index))
-            columns["solar_elevation"] = solar_elevation(index)
+            columns.update(sun_columns(index))
             kinds.update({column: GROUP_KINDS[group] for column in SUN})
         elif group in ("met", "met_oracle"):
             for variable in WEATHER_VARIABLES:
