@@ -152,7 +152,7 @@ rsync -avz data/temp_14day_sensbee_data.json data/eishalle_14day_sensbee_data.js
    To list before deleting: `ls /scratch/ruha6285/sensbee_nvp/results/benchmark_*.json`
 ## Benchmark harness on the cluster
 
-The harness (`scripts/run_harness.py`) runs from the same deployed copy, with its own Python 3.13 environment. Every command runs from your local machine or on the cluster as noted; nothing here starts a job by itself.
+The harness (`scripts/run_harness.py`) runs from the same deployed copy, with its own Python 3.12 environment (`venv-bench`, step 3b). Every command runs from your local machine or on the cluster as noted; nothing here starts a job by itself.
 
 1. **Check the cluster (read-only)**, from your local machine with the VPN on, and keep the output:
    ```bash
@@ -171,3 +171,11 @@ The harness (`scripts/run_harness.py`) runs from the same deployed copy, with it
 3b. **Environment** on the login node (Python 3.12, the Mac's pins): `bash hpc_setup/setup_bench_cluster.sh`. It ends with a smoke import and freezes the result to `constraints-bench-cluster.txt`.
 4. **Pinned weights** on the login node, into `$HF_HOME`: `python hpc_setup/download_models.py --pinned chronos2 mistral7b llama2_7b` (Llama 2 needs its licence accepted on Hugging Face and `huggingface-cli login` first). Each file's SHA-256 is checked against the Hub.
 5. **Runs** on the GPU node with `HF_HUB_OFFLINE=1` and the same `scripts/run_harness.py` commands as on the Mac.
+   GPU node check 2026-10-26 (makalu86): 4× A100-PCIE-40GB shared with other users, no scheduler, Python 3.12.15 (`python3` is 3.6.8), no internet.
+6. **Job scripts** (`hpc_setup/jobs/`): each takes the GPU with the most free memory, refuses to start below a minimum, and stops at the first failed run. There is no queue, so start them under `nohup` from the GPU node; they keep running when the ssh session drops:
+   ```bash
+   ssh -J ruha6285@cslogin.tu-ilmenau.de ruha6285@makalu86
+   cd /scratch/ruha6285/sensbee_nvp && mkdir -p /scratch/ruha6285/benchmark_data/logs
+   GATE=1 nohup bash hpc_setup/jobs/tuned_dl_validation.sh /scratch/ruha6285/benchmark_data deepar > /scratch/ruha6285/benchmark_data/logs/deepar_gate.log 2>&1 &
+   ```
+   `tail -f` the log to follow it. `GATE=1` runs only the first run, twice (timing projection and same-seed check), and stops; the same command without `GATE=1` runs the full grid.
