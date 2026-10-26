@@ -10,6 +10,8 @@
 #   oracle section
 # - Phase 6a: Holm's correction on the hand example of the examiner review, the day bootstrap's grouping by Berlin
 #   day, the family tests end to end, and the halls' open-slot coverage on a hand example
+# - selection on validation: one pick per sensor and model family (tuned configs and covariate sets share a family),
+#   never an oracle run, and only validation runs
 # The report always runs the DM tests, which need statsmodels. So these tests run in the bench venv only.
 
 import json
@@ -25,7 +27,7 @@ pytest.importorskip("statsmodels")
 from benchmark.bands import widened_forecaster  # noqa: E402
 from benchmark.models.mask_models import recent_mask_forecaster  # noqa: E402
 from benchmark.report import (FamilyTest, _berlin_days, day_bootstrap, dm_tests, holm,  # noqa: E402
-                              make_report)
+                              make_report, model_family, validation_selection)
 from benchmark.runner import naive_forecaster, run, seasonal_naive_forecaster  # noqa: E402
 from benchmark.snapshot import MANIFEST_NAME, write_raw_csv  # noqa: E402
 from benchmark.tasks import REPORT_STEPS, SensorTask  # noqa: E402
@@ -400,3 +402,47 @@ def test_open_slot_coverage_by_hand(tmp_path):
     with pytest.raises(ValueError, match="NOT THE RUNS' SNAPSHOT"):
         make_report(runs, tmp_path / "reports", ("snaive", 1), tasks=tasks, report_id="r2",
                     snapshot_dir=_snapshot(tmp_path, name="other")[0])
+
+
+def test_model_family_strips_the_set_and_the_tuned_config():
+    assert model_family("ag_deepar_tuned_c672-lr0.001+cal") == "ag_deepar"
+    assert model_family("chronos2+cal_open_wx") == "chronos2" and model_family("ag_ets") == "ag_ets"
+
+
+# Two tuned configs (one with a covariate set) form one family per sensor; the lower SQL wins. An oracle run and a run
+# on uncommitted code are never picked, even with the lowest SQL. A test-period run and a missing context are refused.
+def test_validation_selection_picks_one_candidate_per_family_and_sensor(tmp_path):
+    snapshot_dir, tasks = _snapshot(tmp_path)
+    out = tmp_path / "runs"
+
+    def offset(c):  # naive forecasts shifted by c
+        def forecast(contexts, horizon, levels, seed):
+            quantiles, status = naive_forecaster(contexts, horizon, levels, seed)
+            return quantiles + c, status
+        return forecast
+
+    def candidate(forecaster, model, run_id, oracle=False, dirty=False):
+        run_dir = run(forecaster, model, snapshot_dir, out, tasks=tasks, period="validation", context_days=(1,),
+                      run_id=run_id)
+        record = json.loads((run_dir / "run.json").read_text())
+        record["code"]["dirty"] = dirty  # the test suite may itself run on uncommitted code
+        if oracle:
+            record["covariates"] = {"oracle": True}  # mark it as an oracle run (its forecasts don't matter here)
+        (run_dir / "run.json").write_text(json.dumps(record))
+        return run_dir
+
+    runs = [candidate(offset(1.0), "m_tuned_a", "a"), candidate(offset(5.0), "m_tuned_b+cal", "b"),
+            candidate(seasonal_naive_forecaster(96), "m+met_oracle", "o", oracle=True),
+            candidate(offset(0.0), "m_tuned_d", "d", dirty=True)]
+    table = validation_selection(runs, context="1d").set_index(["sensor", "model"])
+    assert set(table["family"]) == {"m"}
+    assert table.loc[("W", "m_tuned_a"), "selected"] and not table.loc[("W", "m_tuned_b+cal"), "selected"]
+    for other in ("m+met_oracle", "m_tuned_d"):
+        assert not table.loc[("W", other), "selected"]
+        assert table.loc[("W", other), "mean_SQL"] < table.loc[("W", "m_tuned_a"), "mean_SQL"]
+    assert not table.loc["V", "selected"].any()  # constant visitors: scale 0, SQL undefined, so no pick
+    with pytest.raises(ValueError, match="NO RUN HAS ROWS AT CONTEXT 28d"):
+        validation_selection(runs, context="28d")
+    test_run = run(offset(0.0), "m_tuned_c", snapshot_dir, out, tasks=tasks, context_days=(1,), run_id="c")
+    with pytest.raises(ValueError, match="IS NOT A VALIDATION RUN"):
+        validation_selection([test_run], context="1d")

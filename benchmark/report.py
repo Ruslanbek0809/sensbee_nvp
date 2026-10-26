@@ -382,6 +382,41 @@ def open_slots(snapshot_dir: Path, tasks: dict[str, SensorTask], pairs: pd.DataF
     return pd.concat(out, ignore_index=True)
 
 
+# The model family a run belongs to for selection: its name without a covariate set ("+<set>") and without a tuned
+# config ("_tuned_<config>"), e.g. "ag_deepar_tuned_c672-lr0.001+cal" → "ag_deepar".
+def model_family(model: str) -> str:
+    return model.split("+")[0].split("_tuned_")[0]
+
+
+# Selection on validation (Phase 4 rule E, Phase 6a): per sensor and model family, the candidate with the lowest mean
+# SQL at 24 h over the sensor's valid validation origins at the given context.
+# The candidates must be comparable: load_runs() refuses runs from different snapshots, periods or settings and two
+# runs of one model; this refuses runs that aren't validation runs and a context no run has.
+# Oracle runs, runs on uncommitted code (code.dirty) and candidates with a failed origin are never picked.
+# Returns one row per (sensor, candidate).
+def validation_selection(run_dirs: list[Path], context: str = "28d") -> pd.DataFrame:
+    records, metrics = load_runs(run_dirs)
+    for model, record in records.items():
+        if record["period"] != "validation":
+            raise ValueError(f"{record['dir']} IS NOT A VALIDATION RUN")
+    metrics = metrics[(metrics["horizon_steps"] == max(REPORT_STEPS)) & (metrics["context"] == context)]
+    if not len(metrics):
+        raise ValueError(f"NO RUN HAS ROWS AT CONTEXT {context} (contexts are labelled like '28d')")
+    rows = []
+    for (model, sensor), cell in metrics.groupby(["model", "sensor"]):
+        ok = cell[cell["status"] != "failed"]
+        record = records[model]
+        rows.append({"sensor": sensor, "model": model, "family": model_family(model), "run_id": record["run_id"],
+                     "n_origins": len(ok), "failed": len(cell) - len(ok), "mean_SQL": ok["SQL"].mean(),
+                     "mean_MASE": ok["MASE"].mean(), "oracle": _oracle(record),
+                     "dirty": bool(record["code"].get("dirty"))})
+    table = pd.DataFrame(rows)
+    eligible = table[~table["oracle"] & ~table["dirty"] & (table["failed"] == 0) & table["mean_SQL"].notna()]
+    picks = eligible.loc[eligible.groupby(["sensor", "family"])["mean_SQL"].idxmin()]
+    table["selected"] = table.index.isin(picks.index)
+    return table.sort_values(["sensor", "family", "mean_SQL"], ignore_index=True)
+
+
 # Returns two tables:
 # - the share of negative 0.1 and 0.5 quantiles per model, sensor, context and horizon;
 # - the metrics of the visitor sensors with every quantile clipped at 0 (a sensitivity table only).

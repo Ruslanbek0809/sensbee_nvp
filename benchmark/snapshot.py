@@ -32,11 +32,16 @@ AGGREGATIONS: dict[str, str] = {"AVG": "mean", "MAX": "max"}
 
 
 # Returns the sensbee_nvp commit and whether its working tree has uncommitted changes, for snapshot manifests and run
-# records. Without a git checkout (e.g. a copy on the cluster) both are None, not a misleading "clean".
+# records. Without a git checkout (e.g. a copy on the cluster) it reads the COMMIT file that
+# hpc_setup/deploy_to_cluster.sh writes from the local checkout ({"commit": ..., "dirty": ...}), marked "from":
+# "COMMIT file". Without either, both are None, not a misleading "clean".
 def git_state() -> dict:
     def git(*args: str) -> str:
         return subprocess.run(["git", "-C", str(PROJECT_ROOT), *args], capture_output=True, text=True).stdout.strip()
     commit = git("rev-parse", "HEAD") or None
+    if commit is None and (PROJECT_ROOT / "COMMIT").exists():
+        deployed = json.loads((PROJECT_ROOT / "COMMIT").read_text())
+        return {"repo": "sensbee_nvp", "commit": deployed["commit"], "dirty": deployed["dirty"], "from": "COMMIT file"}
     return {"repo": "sensbee_nvp", "commit": commit, "dirty": bool(git("status", "--porcelain")) if commit else None}
 
 

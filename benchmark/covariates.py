@@ -113,6 +113,7 @@ COVARIATE_SETS: dict[str, CovariateSet] = {
     "stations96": CovariateSet("regular", ("sun", "stations96")),   # Phase 6a sets (header)
     "wx": CovariateSet("visitors", ("wx",)),
     "cal_open_wx": CovariateSet("visitors", ("calendar", "open", "wx")),
+    "cal_parking": CovariateSet("counter", ("calendar",)),  # parking's calendar inputs (tuned trained models)
 }
 
 

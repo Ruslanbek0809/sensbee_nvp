@@ -27,7 +27,8 @@ from benchmark.models.timesfm_models import timesfm25_forecaster
 from benchmark.models.tirex_models import tirex_forecaster
 from benchmark.models.toto_models import toto_forecaster
 from benchmark.models.trained_models import (
-    DEEPAR, DEEPAR_HOLDOUT, DIRECT_TABULAR, PATCHTST, RECURSIVE_TABULAR, TUNING_DAYS, autogluon_trainer,
+    DEEPAR, DEEPAR_HOLDOUT, DIRECT_TABULAR, PATCHTST, RECURSIVE_TABULAR, TUNING_DAYS, autogluon_trainer, input_steps,
+    tuned_grid,
 )
 from benchmark.covariates import KINDS as COVARIATE_KINDS
 from benchmark.tasks import SEASON
@@ -42,6 +43,9 @@ TIREX = ("NX-AI/TiRex", "63c740922493f5fbe60b277609ec62babfba2762")
 TOTO = ("Datadog/Toto-Open-Base-1.0", "0411ceb27bdf7fc3e4892e99edc8ad08192dc3c5")
 MOIRAI2_SMALL = ("Salesforce/moirai-2.0-R-small", "30f43ff08c8494f4943ae1521e9d4e94a0fbb389")
 MISTRAL_7B = ("mistralai/Mistral-7B-v0.1", "27d67f1b5f57dc0953326b2601d68371d40ea8da")
+# Gated (Llama 2 Community License, accepted on Hugging Face first); revision read from the HF API 2026-10-26. Its
+# context is 4k tokens (model card), so 14 days don't fit (Phase 6a plan, 6a.6).
+LLAMA2_7B = ("meta-llama/Llama-2-7b-hf", "01c7f73d771dfac7d292323805ebc428287df4f9")
 PACKAGES = ("autogluon.timeseries", "statsforecast", "statsmodels", "scipy", "torch", "coreforecast", "joblib",
             "chronos-forecasting", "transformers", "huggingface_hub", "accelerate", "timesfm", "tirex-ts", "uni2ts",
             "lightgbm", "mlforecast", "gluonts", "lightning")
@@ -124,6 +128,23 @@ TRAINED: dict[str, Baseline] = {
     "ag_patchtst": Baseline(lambda: autogluon_trainer("PatchTST", PATCHTST, tuning_days=TUNING_DAYS), (14, 28),
                             trained=True),
 }
+
+
+# Tuned trained models (Phase 6a, D-E5): one entry per grid point of trained_models.tuned_grid(), named
+# "<model>_tuned_<config>". Contexts: 14 and 28 days when the input window fits 14 days, else 28 only.
+# The tabular models and DeepAR accept known covariates (calendar inputs); the pick per sensor is made on validation.
+def _tuned(base: str, model: str, params: dict) -> Baseline:
+    contexts = (14, 28) if input_steps(params) <= 14 * SEASON else (28,)
+    point_only = base == "ag_recursive_tabular"
+    tuning = {"tuning_days": TUNING_DAYS} if base in ("ag_deepar", "ag_patchtst") else {}
+    if base == "ag_deepar":
+        tuning["holdout"] = params["context_length"] - 1
+    kinds = () if base == "ag_patchtst" else ("known",)
+    return Baseline(lambda: autogluon_trainer(model, params, point_only=point_only, **tuning), contexts, trained=True,
+                    covariate_kinds=kinds)
+
+
+TUNED: dict[str, Baseline] = {name: _tuned(*spec) for name, spec in tuned_grid().items()}
 
 
 # LLMTime (Phase 3, the research project's method) with Mistral-7B-v0.1, run locally.

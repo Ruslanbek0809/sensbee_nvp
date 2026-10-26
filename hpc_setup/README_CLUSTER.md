@@ -150,3 +150,22 @@ rsync -avz data/temp_14day_sensbee_data.json data/eishalle_14day_sensbee_data.js
    rm -f /scratch/ruha6285/sensbee_nvp/results/benchmark_*.json
    ```
    To list before deleting: `ls /scratch/ruha6285/sensbee_nvp/results/benchmark_*.json`
+## Benchmark harness on the cluster
+
+The harness (`scripts/run_harness.py`) runs from the same deployed copy, with its own Python 3.13 environment. Every command runs from your local machine or on the cluster as noted; nothing here starts a job by itself.
+
+1. **Check the cluster (read-only)**, from your local machine with the VPN on, and keep the output:
+   ```bash
+   ssh ruha6285@cslogin.tu-ilmenau.de 'bash -s' < hpc_setup/check_cluster.sh
+   ssh ruha6285@cslogin.tu-ilmenau.de "ssh makalu86 'bash -s'" < hpc_setup/check_cluster.sh
+   ```
+   It prints the Python versions and modules, GPUs and driver, scheduler, free space on `/scratch` and whether huggingface.co is reachable. The environment setup depends on it (Python 3.13 is required: autogluon.timeseries needs < 3.14, the bench constraints were frozen on 3.13).
+2. **Deploy the code** from a clean checkout: `./hpc_setup/deploy_to_cluster.sh`. It also copies `tests/`, `pytest.ini` and the requirement and constraint files, and writes `COMMIT` (the deployed commit and whether the checkout was dirty), which every `run.json` records.
+3. **Copy a snapshot** (private data; keep it on `/scratch`, never in a shared folder):
+   ```bash
+   ssh ruha6285@cslogin.tu-ilmenau.de 'mkdir -p /scratch/ruha6285/benchmark_data/snapshots'
+   rsync -av ../../benchmark_data/snapshots/sensbee-2026-10-01 ruha6285@cslogin.tu-ilmenau.de:/scratch/ruha6285/benchmark_data/snapshots/
+   ```
+   The harness checks each file's SHA-256 against the manifest on load.
+4. **Pinned weights** on the login node, into `$HF_HOME`: `python hpc_setup/download_models.py --pinned chronos2 mistral7b llama2_7b` (Llama 2 needs its licence accepted on Hugging Face and `huggingface-cli login` first). Each file's SHA-256 is checked against the Hub.
+5. **Runs** on the GPU node with `HF_HUB_OFFLINE=1` and the same `scripts/run_harness.py` commands as on the Mac.

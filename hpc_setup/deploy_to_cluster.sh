@@ -28,12 +28,23 @@ echo "Temporary directory: $TEMP_DIR"
 # Copy necessary files
 cp -r "$LOCAL_DIR/src" "$TEMP_DIR/"
 cp -r "$LOCAL_DIR/hpc_setup" "$TEMP_DIR/"
-# Benchmark harness (benchmark/ and its CLIs in scripts/). Data snapshots live outside this repo and are NOT copied;
-# copy one separately and pass its folder to scripts/run_harness.py --snapshot. Without .git on the cluster, run.json
-# records commit: null.
+# Benchmark harness (benchmark/ and its CLIs in scripts/), its tests, and the requirement and constraint files of the
+# bench venv. Data snapshots live outside this repo and are NOT copied; copy one separately and pass its folder to
+# scripts/run_harness.py --snapshot.
 cp -r "$LOCAL_DIR/benchmark" "$TEMP_DIR/"
 cp -r "$LOCAL_DIR/scripts" "$TEMP_DIR/"
-cp "$LOCAL_DIR/requirements.txt" "$TEMP_DIR/" 2>/dev/null || true
+cp -r "$LOCAL_DIR/tests" "$TEMP_DIR/"
+cp "$LOCAL_DIR/pytest.ini" "$TEMP_DIR/"
+for f in requirements.txt requirements-dev.txt requirements-bench.txt constraints.txt constraints-bench.txt; do
+    cp "$LOCAL_DIR/$f" "$TEMP_DIR/"
+done
+# There is no .git on the cluster, so the deployed commit goes into COMMIT; benchmark.snapshot.git_state() reads it
+# and run.json records it. Deploy from a clean checkout for runs that go into tables.
+COMMIT=$(git -C "$LOCAL_DIR" rev-parse HEAD)
+if [ -n "$(git -C "$LOCAL_DIR" status --porcelain)" ]; then DIRTY=true; else DIRTY=false; fi
+echo "{\"commit\": \"$COMMIT\", \"dirty\": $DIRTY}" > "$TEMP_DIR/COMMIT"
+echo "Deploying commit $COMMIT (dirty: $DIRTY)"
+
 
 # Copy data directory (required for benchmark: temp_* and eishalle_* JSON files)
 if [ -d "$LOCAL_DIR/data" ]; then

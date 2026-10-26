@@ -23,6 +23,9 @@
 # - it changes the forecast when its future changes
 # - batch independence holds
 # - a forecaster trained with covariates refuses a forecast without them
+# Tuned configs (Phase 6a, D-E5):
+# - the grid has the planned 32 points, each differing from its model's default only in the grid's keys
+# - a tuned DeepAR config with calendar inputs feeds them to the network
 # Run only where AutoGluon is installed (the bench venv).
 
 import numpy as np
@@ -34,7 +37,8 @@ pytest.importorskip("autogluon.timeseries")
 from benchmark import covariates as cov  # noqa: E402
 from benchmark.models import TRAINED  # noqa: E402
 from benchmark.models.trained_models import (  # noqa: E402
-    DEEPAR, DEEPAR_HOLDOUT, DIRECT_TABULAR, LAGS, PATCHTST, TUNING_DAYS, autogluon_trainer, input_steps, tuning_split,
+    DEEPAR, DEEPAR_HOLDOUT, DIRECT_TABULAR, LAGS, PATCHTST, RECURSIVE_TABULAR, TUNING_DAYS, autogluon_trainer,
+    input_steps, tuned_grid, tuning_split,
 )
 from benchmark.tasks import BUCKETS_PER_DAY, HORIZON, QUANTILE_LEVELS  # noqa: E402
 
@@ -282,3 +286,45 @@ def test_known_covariates_reach_the_tabular_model_and_its_forecast(name):
     assert rise.mean() > 4
     with pytest.raises(ValueError, match="EVERY FORECAST NEEDS THEM"):
         forecaster(contexts, HORIZON, QUANTILE_LEVELS, 0)
+
+
+# The planned grid (plan 6a.3): 8 + 8 tabular, 4 DeepAR (each run with and without calendar inputs), 12 PatchTST.
+# Every config differs from its model's default only in the keys the grid varies.
+def test_the_tuned_grid_varies_only_its_planned_keys():
+    defaults = {"ag_direct_tabular": DIRECT_TABULAR, "ag_recursive_tabular": RECURSIVE_TABULAR,
+                "ag_deepar": DEEPAR, "ag_patchtst": PATCHTST}
+    varied = {"ag_direct_tabular": {"lags", "differences", "model_hyperparameters"},
+              "ag_recursive_tabular": {"lags", "differences", "model_hyperparameters"},
+              "ag_deepar": {"context_length", "lr", "max_epochs", "disable_known_covariates"},
+              "ag_patchtst": {"context_length", "lr", "d_model", "max_epochs"}}
+    grid = tuned_grid()
+    counts = {}
+    for name, (base, _, params) in grid.items():
+        counts[base] = counts.get(base, 0) + 1
+        assert params.keys() == defaults[base].keys()
+        assert {k for k in params if params[k] != defaults[base][k]} <= varied[base], name
+        if "model_hyperparameters" in params:
+            changed = {k for k, v in params["model_hyperparameters"].items()
+                       if v != defaults[base]["model_hyperparameters"][k]}
+            assert changed <= {"learning_rate"}
+    assert counts == {"ag_direct_tabular": 8, "ag_recursive_tabular": 8, "ag_deepar": 4, "ag_patchtst": 12}
+    assert len({name.split("_tuned_")[1] for name in grid if name.startswith("ag_direct")}) == 8
+
+
+# A tuned DeepAR config (2 short epochs) trained with a known column: the network gets it next to its age feature.
+def test_a_tuned_deepar_config_takes_calendar_inputs():
+    _, _, params = tuned_grid()["ag_deepar_tuned_c192-lr0.001"]
+    trainer, _ = autogluon_trainer("DeepAR", {**params, "max_epochs": 2, "num_batches_per_epoch": 5},
+                                   tuning_days=TUNING_DAYS, holdout=params["context_length"] - 1)
+    items, contexts = _data(days=20)  # 13 days of training after the 7 tuning days
+    index = pd.date_range("2026-01-01", periods=22 * BUCKETS_PER_DAY, freq="15min")
+    frame = pd.DataFrame({"k": (index.hour < 12).astype(float)}, index=index)
+    kinds = {"k": "known"}
+    windows = [cov.covariate_window(frame, kinds, c.index[-1] + pd.Timedelta("15min"), c.index) for c in contexts]
+    cutoff = items[0].index[-1] + pd.Timedelta("15min")
+    forecaster, info = trainer("S", items, 0, covariates=cov.training_covariates(frame, kinds, cutoff))
+    network = _fitted_model(forecaster).gts_predictor.prediction_net.model
+    assert network.num_feat_dynamic_real == 2 and info["known_covariates"] == ["k"]  # age feature + k
+    assert info["covariate_scaler"] == "global"  # AutoGluon's GluonTS default: DeepAR scales only the target
+    batch, status = forecaster(contexts, HORIZON, QUANTILE_LEVELS, 0, covariates=windows)
+    assert status == ["ok"] * 3 and np.isfinite(batch).all()

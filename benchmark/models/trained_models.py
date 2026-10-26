@@ -42,7 +42,10 @@
 # - The trainer gets the known columns before the cutoff.
 #   They become extra columns of the training items and AutoGluon's known_covariates_names.
 # - Each forecast gets its window's context rows as columns and its HORIZON future rows as known_covariates.
-# - covariate_scaler and covariate_regressor are None (AutoGluon's tabular default, written out).
+# - covariate_scaler and covariate_regressor are None (AutoGluon's tabular default, written out). A GluonTS model with
+#   known covariates (tuned DeepAR, Phase 6a) gets AutoGluon's GluonTS default instead, covariate_scaler="global"
+#   (gluonts/abstract.py:217): it standardizes (or quantile-transforms, if skewed) every non-0/1 real covariate,
+#   fitted on the training data, since DeepAR's own scaling covers the target only (solar elevation is in degrees).
 # AutoGluon 1.6.3 also adds a scaled copy of every known covariate that isn't 0/1 (mlforecast.py:293-303, no switch).
 # The copy is divided by the covariate's mean |value| per item.
 # - When fitting, the mean is over the whole training item.
@@ -85,6 +88,7 @@ TABULAR_COMMON = {"lags": list(LAGS), "date_features": [], "model_name": "GBM", 
                   "max_num_samples": None}
 EVAL_METRIC = "SQL"
 COVARIATE_DEFAULTS = {"covariate_scaler": None, "covariate_regressor": None}  # AutoGluon's tabular defaults
+GLUONTS_COVARIATE_DEFAULTS = {"covariate_scaler": "global", "covariate_regressor": None}  # its GluonTS defaults
 TUNING_DAYS = 7
 # AutoGluon's training defaults for GluonTS models, written out, plus no covariates and the kept Lightning logs.
 GLUONTS_COMMON = {"disable_static_features": True, "disable_known_covariates": True, "max_epochs": 100,
@@ -150,6 +154,7 @@ def autogluon_trainer(model: str, params: dict, point_only: bool = False, tuning
     hyperparameters = dict(params)
     steps = input_steps(params)
     min_past = steps if "context_length" in params else 0
+    covariate_defaults = GLUONTS_COVARIATE_DEFAULTS if "context_length" in params else COVARIATE_DEFAULTS
 
     def train(sensor: str, items: list[pd.Series], seed: int, covariates: Optional[pd.DataFrame] = None):
         from autogluon.timeseries import TimeSeriesDataFrame, TimeSeriesPredictor
@@ -163,7 +168,7 @@ def autogluon_trainer(model: str, params: dict, point_only: bool = False, tuning
                                         path=str(Path(workdir.name) / "predictor"), verbosity=0, log_to_file=False)
         fitted = dict(hyperparameters)
         if names:
-            fitted.update(COVARIATE_DEFAULTS)
+            fitted.update(covariate_defaults)
         if "model_hyperparameters" in fitted:
             fitted["model_hyperparameters"] = {**fitted["model_hyperparameters"], "seed": seed}
         if min_past:
@@ -178,7 +183,7 @@ def autogluon_trainer(model: str, params: dict, point_only: bool = False, tuning
             info = {"tuning_days": tuning_days, "holdout_steps": holdout, "tuning_end": str(tune[0].index[-1])}
         info = {"training_rows": int(sum(len(i) for i in items)), **info}
         if names:
-            info.update({"known_covariates": names, **COVARIATE_DEFAULTS})
+            info.update({"known_covariates": names, **covariate_defaults})
         train_covariates = None if covariates is None else [covariates] * len(items)
         predictor.fit(_batch_frame(items, prefix="train", covariates=train_covariates), tuning_data=tuning,
                       hyperparameters={model: fitted},
@@ -230,3 +235,38 @@ DEEPAR_HOLDOUT = DEEPAR["context_length"] - 1  # context steps its validation lo
 PATCHTST = {"context_length": BUCKETS_PER_WEEK, "patch_len": 16, "stride": 8, "padding_patch": "end", "d_model": 32,
             "nhead": 4, "dim_feedforward": 128, "num_encoder_layers": 2, "dropout": 0.1, "activation": "relu",
             "norm_first": False, "scaling": "mean", "weight_decay": 1e-8, **GLUONTS_COMMON}
+
+# Tuned settings (Phase 6a, D-E5; grid fixed in docs/plans/2026-10-26-phase-6-robustness-and-confirmatory.md, 6a.3,
+# before any run). Each grid point is a named config; the pick per sensor is made on the validation period only.
+# The tabular models take calendar inputs in every tuned config (the run's covariate set: cal for the halls, sun for
+# the weather stations, cal_parking for parking). DeepAR runs each config with and without them. PatchTST takes none
+# (GluonTS shifts its covariates by the horizon). The GluonTS models get up to 300 epochs, patience 20.
+SHORT_LAGS = (*range(1, 9), SEASON - 1, SEASON, SEASON + 1, BUCKETS_PER_WEEK - 1, BUCKETS_PER_WEEK)  # 673 > the cap
+TUNED_EPOCHS = 300
+
+
+# The tuned grid: config code → (registry base, AutoGluon model, params).
+def tuned_grid() -> dict[str, tuple[str, str, dict]]:
+    grid = {}
+    for lag_name, lags in (("Lfull", LAGS), ("Lshort", SHORT_LAGS)):
+        for lr in (0.02, 0.05):
+            for base, model, params, differences in (
+                    ("ag_direct_tabular", "DirectTabular", DIRECT_TABULAR, ([], [SEASON])),
+                    ("ag_recursive_tabular", "RecursiveTabular", RECURSIVE_TABULAR,
+                     ([SEASON], [SEASON, BUCKETS_PER_WEEK]))):
+                for diff in differences:
+                    code = f"{lag_name}-lr{lr:g}-d{'+'.join(map(str, diff)) or '0'}"
+                    grid[f"{base}_tuned_{code}"] = (base, model, {
+                        **params, "lags": list(lags), "differences": list(diff),
+                        "model_hyperparameters": {**LIGHTGBM, "learning_rate": lr}})
+    for context in (2 * SEASON, BUCKETS_PER_WEEK):
+        for lr in (1e-3, 3e-4):
+            grid[f"ag_deepar_tuned_c{context}-lr{lr:g}"] = ("ag_deepar", "DeepAR", {
+                **DEEPAR, "context_length": context, "lr": lr, "max_epochs": TUNED_EPOCHS,
+                "disable_known_covariates": False})
+    for context in (BUCKETS_PER_WEEK, 2 * BUCKETS_PER_WEEK, 4 * BUCKETS_PER_WEEK):
+        for lr in (1e-3, 1e-4):
+            for width in (32, 64):
+                grid[f"ag_patchtst_tuned_c{context}-lr{lr:g}-w{width}"] = ("ag_patchtst", "PatchTST", {
+                    **PATCHTST, "context_length": context, "lr": lr, "d_model": width, "max_epochs": TUNED_EPOCHS})
+    return grid

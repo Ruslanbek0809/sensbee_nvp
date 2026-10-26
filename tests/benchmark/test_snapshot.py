@@ -191,3 +191,10 @@ def test_git_state_is_unknown_without_a_git_checkout(tmp_path, monkeypatch):
     # A copy without .git (e.g. deployed to the cluster) must not claim a clean tree.
     monkeypatch.setattr(snapshot, "PROJECT_ROOT", tmp_path)
     assert snapshot.git_state() == {"repo": "sensbee_nvp", "commit": None, "dirty": None}
+
+
+def test_git_state_reads_the_deployed_commit_file_without_a_git_checkout(tmp_path, monkeypatch):
+    # hpc_setup/deploy_to_cluster.sh writes COMMIT next to the code, so cluster runs record what was deployed.
+    monkeypatch.setattr(snapshot, "PROJECT_ROOT", tmp_path)
+    (tmp_path / "COMMIT").write_text('{"commit": "abc123", "dirty": false}')
+    assert snapshot.git_state() == {"repo": "sensbee_nvp", "commit": "abc123", "dirty": False, "from": "COMMIT file"}

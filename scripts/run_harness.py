@@ -11,6 +11,8 @@
 # - a zero-shot foundation model (Chronos-2, Chronos-Bolt, TimesFM 2.5, TiRex, Toto). Needs the bench venv and the
 #   downloaded weights. Moirai-2 runs in venv-moirai.
 # - a trained model, fitted per sensor on the data before the period. Needs the bench venv.
+#   Tuned trained models (Phase 6a) are "<model>_tuned_<config>"; their calendar inputs come with --covariates
+#   (cal for the halls, sun for the weather stations, cal_parking for parking).
 # - LLMTime with a local LLM. Needs the bench venv and the weights.
 #
 # A model runs on its own allowed context lengths unless --contexts picks some of them.
@@ -54,7 +56,7 @@ sys.path.insert(0, str(PROJECT_ROOT))
 from benchmark.bands import widened_forecaster  # noqa: E402
 from benchmark.covariates import COVARIATE_SETS  # noqa: E402
 from benchmark.metrics import METRICS  # noqa: E402
-from benchmark.models import BASELINES, LLMTIME, MASKED, TRAINED, ZERO_SHOT, library_versions  # noqa: E402
+from benchmark.models import BASELINES, LLMTIME, MASKED, TRAINED, TUNED, ZERO_SHOT, library_versions  # noqa: E402
 from benchmark.runner import CHECK_FORECASTERS, run  # noqa: E402
 from benchmark.snapshot import load_snapshot  # noqa: E402
 from benchmark.tasks import CONTEXT_DAYS, TASKS, origin_table, target_series, validity_context_days  # noqa: E402
@@ -107,7 +109,8 @@ def main() -> None:
     parser = argparse.ArgumentParser(description="Benchmark harness on a frozen snapshot (no network)")
     parser.add_argument("--snapshot", type=Path, required=True, help="snapshot folder (with manifest.json)")
     parser.add_argument("--out", type=Path, help="parent folder; a new <run id> folder is created (not for --dry-run)")
-    parser.add_argument("--model", choices=[*CHECK_FORECASTERS, *BASELINES, *ZERO_SHOT, *TRAINED, *LLMTIME, *MASKED],
+    parser.add_argument("--model", choices=[*CHECK_FORECASTERS, *BASELINES, *ZERO_SHOT, *TRAINED, *TUNED, *LLMTIME,
+                                            *MASKED],
                         help="check forecaster, baseline, zero-shot, trained or LLMTime model")
     parser.add_argument("--dry-run", action="store_true", help="list the origins per sensor and write nothing")
     parser.add_argument("--sensors", nargs="+", choices=list(TASKS), default=list(TASKS))
@@ -132,7 +135,7 @@ def main() -> None:
     if args.out is None or args.model is None:
         parser.error("--out and --model are required unless --dry-run")
     model_info, forecaster, trainer = {}, None, None
-    models = {**BASELINES, **ZERO_SHOT, **TRAINED, **LLMTIME, **MASKED}
+    models = {**BASELINES, **ZERO_SHOT, **TRAINED, **TUNED, **LLMTIME, **MASKED}
     name = args.model
     if (args.model in MASKED) != (args.mask_threshold is not None):
         parser.error("--mask-threshold goes with a MASKED model, and every MASKED model needs it")
