@@ -74,8 +74,13 @@ class FamilyTest:
 
 # Reads each run's run.json and metrics.csv.
 # Refuses runs that differ in snapshot, period or settings, and two runs of the same model.
+# aliases (run folder → model name) reports several runs as one model, e.g. a tuned model whose configs were picked
+# per sensor on validation (Phase 6a). Every merged run must be listed in aliases, cover disjoint sensors, and agree on
+# point_only, the oracle flag and the origin stride; the merged record lists every source run ("sources") and folder
+# ("dirs").
 # Returns (records by model, metrics of all runs with a "model" column).
-def load_runs(run_dirs: list[Path]) -> tuple[dict[str, dict], pd.DataFrame]:
+def load_runs(run_dirs: list[Path], aliases: Optional[dict[str, str]] = None) -> tuple[dict[str, dict], pd.DataFrame]:
+    aliases = {str(Path(k)): v for k, v in (aliases or {}).items()}
     records, frames, first = {}, [], None
     for run_dir in run_dirs:
         record = json.loads((Path(run_dir) / "run.json").read_text())
@@ -84,12 +89,25 @@ def load_runs(run_dirs: list[Path]) -> tuple[dict[str, dict], pd.DataFrame]:
             first = same
         elif same != first:
             raise ValueError(f"RUN {record['run_id']} DIFFERS IN SNAPSHOT, PERIOD OR SETTINGS from the first run")
-        if record["model"] in records:
-            raise ValueError(f"TWO RUNS OF MODEL {record['model']}")
-        record["dir"] = str(run_dir)
-        records[record["model"]] = record
+        model = aliases.get(str(Path(run_dir)), record["model"])
+        record.update(dir=str(run_dir), dirs=[str(run_dir)], sources={record["run_id"]: record["model"]})
+        if model in records:
+            merged = records[model]
+            if not all(d in aliases for d in [*merged["dirs"], str(Path(run_dir))]):
+                raise ValueError(f"TWO RUNS OF MODEL {model}")
+            shared = sorted(set(merged["counts"]) & set(record["counts"]))
+            if shared:
+                raise ValueError(f"RUNS MERGED AS {model} SHARE SENSORS {shared}")
+            flags = (_point_only(merged), _oracle(merged), merged.get("origin_stride", 1))
+            if flags != (_point_only(record), _oracle(record), record.get("origin_stride", 1)):
+                raise ValueError(f"RUNS MERGED AS {model} DIFFER IN point_only, ORACLE OR origin_stride")
+            merged["counts"] = {**merged["counts"], **record["counts"]}
+            merged["dirs"].append(str(run_dir))
+            merged["sources"][record["run_id"]] = record["model"]
+        else:
+            records[model] = {**record, "model": model}
         metrics = pd.read_csv(Path(run_dir) / "metrics.csv", parse_dates=["origin"])
-        frames.append(metrics.assign(model=record["model"]))
+        frames.append(metrics.assign(model=model))
     return records, pd.concat(frames, ignore_index=True)
 
 
@@ -429,7 +447,8 @@ def forecast_tables(records: dict[str, dict], metrics: pd.DataFrame, tasks: dict
     visitors = {name for name, task in tasks.items() if task.kind == "visitors"}
     negative_rows, clipped_rows = [], []
     for model, record in records.items():
-        forecasts = pd.read_csv(Path(record["dir"]) / "forecasts.csv.gz", parse_dates=["origin"])
+        forecasts = pd.concat([pd.read_csv(Path(d) / "forecasts.csv.gz", parse_dates=["origin"])
+                               for d in record["dirs"]], ignore_index=True)
         forecasts = forecasts[forecasts["status"] != "failed"]
         if keep is not None:
             forecasts = forecasts.merge(keep, on=["sensor", "origin"])
@@ -609,17 +628,18 @@ def summary_markdown(cell_table: pd.DataFrame, skill_table: pd.DataFrame, record
 # common: only the (sensor, origin) pairs every run evaluated (see the header).
 # families: the family tests (default_families() plus any chosen on validation); none = no families.csv.
 # snapshot_dir: the runs' snapshot, for the open-slot coverage of the halls (refused if its id differs).
+# aliases: run folder → model name, to report several runs as one model (load_runs).
 # Returns the folder.
 def make_report(run_dirs: list[Path], out_root: Path, reference: tuple[str, int],
                 tasks: Optional[dict[str, SensorTask]] = None, report_id: Optional[str] = None,
                 common: bool = False, families: Optional[list[FamilyTest]] = None,
-                snapshot_dir: Optional[Path] = None) -> Path:
+                snapshot_dir: Optional[Path] = None, aliases: Optional[dict[str, str]] = None) -> Path:
     tasks = TASKS if tasks is None else tasks
     started = datetime.now(timezone.utc)
     report_dir = Path(out_root) / (report_id or f"{started:%Y-%m-%dT%H%M%SZ}_report")
     if report_dir.exists():
         raise FileExistsError(f"{report_dir} EXISTS; reports are never overwritten")
-    records, metrics = load_runs(run_dirs)
+    records, metrics = load_runs(run_dirs, aliases)
     keep = None
     if common:
         metrics, keep = common_origins(metrics)
@@ -653,6 +673,7 @@ def make_report(run_dirs: list[Path], out_root: Path, reference: tuple[str, int]
     first = next(iter(records.values()))
     (report_dir / "report.json").write_text(json.dumps({
         "report_id": report_dir.name, "runs": {m: r["run_id"] for m, r in records.items()},
+        "merged": {m: r["sources"] for m, r in records.items() if len(r["sources"]) > 1},
         "snapshot": first["snapshot"], "period": first["period"], "reference": list(reference),
         "dm": {"horizon": DM_HORIZON, "harvey_adj": True}, "common_origins": n_common,
         "families": None if families is None else [vars(test) for test in families],

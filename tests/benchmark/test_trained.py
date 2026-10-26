@@ -309,6 +309,7 @@ def test_the_tuned_grid_varies_only_its_planned_keys():
             assert changed <= {"learning_rate"}
     assert counts == {"ag_direct_tabular": 8, "ag_recursive_tabular": 8, "ag_deepar": 4, "ag_patchtst": 12}
     assert len({name.split("_tuned_")[1] for name in grid if name.startswith("ag_direct")}) == 8
+    assert not any("+" in name for name in grid)  # "+" separates a run's covariate set ("<model>+<set>")
 
 
 # A tuned DeepAR config (2 short epochs) trained with a known column: the network gets it next to its age feature.

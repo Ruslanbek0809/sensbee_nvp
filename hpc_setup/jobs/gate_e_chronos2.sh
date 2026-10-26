@@ -1,7 +1,8 @@
 #!/bin/bash
 # Gate E (Phase 6a): is the cluster environment equivalent to the Mac's? Runs zero-shot Chronos-2 on the validation
 # period (5 main sensors, contexts 1/7/28 d; the adapter runs on the CPU) and compares its forecasts with the Mac run
-# 2026-10-14T222254Z_chronos2 (same snapshot, period, contexts). Pass: every quantile within 1e-3 relative.
+# 2026-10-14T222254Z_chronos2 (same snapshot, period, contexts). Pass (scripts/compare_runs.py): every quantile
+# within 0.01 in target units and every per-cell metric mean equal at 4 decimals.
 # GPU-hours: 0 (CPU only); wall time a few minutes.
 # Usage, on the cluster from the deployed project folder (the Mac run's folder copied to the cluster first):
 #   bash hpc_setup/jobs/gate_e_chronos2.sh /scratch/ruha6285/benchmark_data <Mac run folder on the cluster>
@@ -19,4 +20,4 @@ venv-bench/bin/python scripts/run_harness.py --snapshot "$DATA/snapshots/sensbee
     --out "$DATA/results" --model chronos2 --period validation --contexts 1 7 28 \
     --sensors MANEBACH_WEATHER_STATION STUTZERBACH_WEATHER_STATION FRAUENWALD_WEATHER_STATION EISHALLE SCHWIMMHALLE
 CLUSTER_RUN=$(ls -d "$DATA"/results/*_chronos2 | tail -1)
-venv-bench/bin/python scripts/compare_runs.py "$MAC_RUN" "$CLUSTER_RUN" --rtol 1e-3
+venv-bench/bin/python scripts/compare_runs.py "$MAC_RUN" "$CLUSTER_RUN"

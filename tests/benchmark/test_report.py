@@ -10,6 +10,7 @@
 #   oracle section
 # - Phase 6a: Holm's correction on the hand example of the examiner review, the day bootstrap's grouping by Berlin
 #   day, the family tests end to end, and the halls' open-slot coverage on a hand example
+# - runs merged as one model (--as): the same tables as one run on both sensors; overlapping sensors refused
 # - selection on validation: one pick per sensor and model family (tuned configs and covariate sets share a family),
 #   never an oracle run, and only validation runs
 # The report always runs the DM tests, which need statsmodels. So these tests run in the bench venv only.
@@ -446,3 +447,31 @@ def test_validation_selection_picks_one_candidate_per_family_and_sensor(tmp_path
     test_run = run(offset(0.0), "m_tuned_c", snapshot_dir, out, tasks=tasks, context_days=(1,), run_id="c")
     with pytest.raises(ValueError, match="IS NOT A VALIDATION RUN"):
         validation_selection([test_run], context="1d")
+
+
+# Two runs of one forecaster on disjoint sensors, merged as "m", give exactly the cells and skill of one run on both
+# sensors; merging runs that share a sensor is refused.
+def test_runs_merged_as_one_model_equal_one_run_on_all_sensors(tmp_path):
+    snapshot_dir, tasks = _snapshot(tmp_path)
+    out = tmp_path / "runs"
+    ref = run(seasonal_naive_forecaster(96), "snaive", snapshot_dir, out, tasks=tasks, context_days=(1,), run_id="ref")
+    whole = run(naive_forecaster, "m", snapshot_dir, out, tasks=tasks, context_days=(1,), run_id="whole")
+    w = run(naive_forecaster, "m_w", snapshot_dir, out, tasks={"W": tasks["W"]}, context_days=(1,), run_id="w")
+    v = run(naive_forecaster, "m_v", snapshot_dir, out, tasks={"V": tasks["V"]}, context_days=(1,), run_id="v")
+    one = make_report([ref, whole], tmp_path / "reports", ("snaive", 1), tasks=tasks, report_id="one")
+    merged = make_report([ref, w, v], tmp_path / "reports", ("snaive", 1), tasks=tasks, report_id="merged",
+                         aliases={str(w): "m", str(v): "m"})
+    for name in ("cells.csv", "skill.csv"):
+        pd.testing.assert_frame_equal(pd.read_csv(one / name), pd.read_csv(merged / name))
+    assert json.loads((merged / "report.json").read_text())["merged"] == {"m": {"w": "m_w", "v": "m_v"}}
+    with pytest.raises(ValueError, match="SHARE SENSORS"):
+        make_report([ref, w, whole], tmp_path / "reports", ("snaive", 1), tasks=tasks, report_id="bad",
+                    aliases={str(w): "m", str(whole): "m"})
+    with pytest.raises(ValueError, match="TWO RUNS OF MODEL m"):  # whole isn't aliased: no silent merge
+        make_report([ref, whole, v], tmp_path / "reports", ("snaive", 1), tasks=tasks, report_id="bad2",
+                    aliases={str(v): "m"})
+    strided = run(naive_forecaster, "m_s", snapshot_dir, out, tasks={"V": tasks["V"]}, context_days=(1,),
+                  run_id="s", origin_stride=2)
+    with pytest.raises(ValueError, match="ORACLE OR origin_stride"):
+        make_report([ref, w, strided], tmp_path / "reports", ("snaive", 1), tasks=tasks, report_id="bad3",
+                    aliases={str(w): "m", str(strided): "m"})

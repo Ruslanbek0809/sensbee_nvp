@@ -12,6 +12,8 @@
 # Test families (Phase 6a, frozen protocol F1-F7): the defaults that need no validation choice are always added
 # (benchmark.report.default_families, 28-day context); --test adds one chosen on validation, e.g. F5 or F7.
 # --snapshot gives the halls' open-slot coverage (COV80_open).
+# --as NAME RUN... reports several runs (disjoint sensors) as one model NAME, e.g. a tuned model whose config was
+# picked per sensor; those runs needn't be listed under --runs again.
 #
 # Usage (from sensbee_nvp/):
 #   venv-bench/bin/python scripts/make_report.py --runs ../../benchmark_data/results/<run>... \
@@ -47,17 +49,23 @@ def main() -> None:
     parser.add_argument("--common-origins", action="store_true",
                         help="only the (sensor, origin) pairs that every run evaluated")
     parser.add_argument("--snapshot", type=Path, help="the runs' snapshot, for the halls' open-slot coverage")
+    parser.add_argument("--as", dest="aliases", nargs="+", action="append", default=[], metavar="NAME RUN",
+                        help="report the following run folders as one model NAME (repeatable)")
     parser.add_argument("--test", nargs=3, action="append", default=[], metavar=("FAMILY", "MODEL@CTX", "AGAINST@CTX"),
                         help="an extra family test chosen on validation (repeatable)")
     args = parser.parse_args()
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s")
-    records, _ = load_runs(args.runs)
+    if any(len(group) < 2 for group in args.aliases):
+        parser.error("--as needs a NAME and at least one run folder")
+    aliases = {str(run): group[0] for group in args.aliases for run in group[1:]}
+    runs = [*args.runs, *[Path(run) for group in args.aliases for run in group[1:]]]
+    records, _ = load_runs(runs, aliases)
     families = default_families(set(records), REFERENCE, {m: b.contexts for m, b in ZERO_SHOT.items()},
                                 {m: b.contexts for m, b in LLMTIME.items()})
     families += [FamilyTest(family, *_model_context(model), *_model_context(against))
                  for family, model, against in args.test]
-    report_dir = make_report(args.runs, args.out, REFERENCE, common=args.common_origins, families=families,
-                             snapshot_dir=args.snapshot)
+    report_dir = make_report(runs, args.out, REFERENCE, common=args.common_origins, families=families,
+                             snapshot_dir=args.snapshot, aliases=aliases)
     print((report_dir / "summary.md").read_text())
     print(f"REPORT WRITTEN to {report_dir}", file=sys.stderr)
 

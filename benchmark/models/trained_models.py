@@ -255,7 +255,7 @@ def tuned_grid() -> dict[str, tuple[str, str, dict]]:
                     ("ag_recursive_tabular", "RecursiveTabular", RECURSIVE_TABULAR,
                      ([SEASON], [SEASON, BUCKETS_PER_WEEK]))):
                 for diff in differences:
-                    code = f"{lag_name}-lr{lr:g}-d{'+'.join(map(str, diff)) or '0'}"
+                    code = f"{lag_name}-lr{lr:g}-d{'-'.join(map(str, diff)) or '0'}"  # no "+": it marks a set
                     grid[f"{base}_tuned_{code}"] = (base, model, {
                         **params, "lags": list(lags), "differences": list(diff),
                         "model_hyperparameters": {**LIGHTGBM, "learning_rate": lr}})
