@@ -14,7 +14,7 @@ import numpy as np
 from benchmark.metrics import coverage80
 
 # Fitted on validation (28-day context, all 96 steps, bands other than [0, 0]); fit output in the thesis root:
-# benchmark_data/spikes/2026-10-22T215830Z_phase5_5.4_bands/band_factors.csv. Validation COV80 goes from
+# benchmark_data/spikes/2026-10-22T220917Z_phase5_5.4_bands/band_factors.csv. Validation COV80 goes from
 # 0.706 / 0.720 / 0.739 to about 0.80.
 BAND_FACTORS = {"plain": 1.20, "stations": 1.19, "mask": 1.12}
 FIT_GRID = np.round(np.arange(100, 301) / 100, 2)  # 1.00, 1.01, ..., 3.00 (D-E4 widens only)
