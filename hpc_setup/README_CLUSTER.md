@@ -157,9 +157,10 @@ The harness (`scripts/run_harness.py`) runs from the same deployed copy, with it
 1. **Check the cluster (read-only)**, from your local machine with the VPN on, and keep the output:
    ```bash
    ssh ruha6285@cslogin.tu-ilmenau.de 'bash -s' < hpc_setup/check_cluster.sh
-   ssh ruha6285@cslogin.tu-ilmenau.de "ssh makalu86 'bash -s'" < hpc_setup/check_cluster.sh
+   ssh -J ruha6285@cslogin.tu-ilmenau.de ruha6285@makalu86 'bash -s' < hpc_setup/check_cluster.sh
    ```
-   It prints the Python versions and modules, GPUs and driver, scheduler, free space on `/scratch` and whether huggingface.co is reachable. The environment setup depends on it (Python 3.13 is required: autogluon.timeseries needs < 3.14, the bench constraints were frozen on 3.13).
+   It prints the Python versions and modules, GPUs and driver, scheduler, free space on `/scratch` and whether huggingface.co is reachable. For the GPU node, `-J` (jump host) asks for each password on your terminal; a nested `ssh` inside the first command would read it from the piped script and fail.
+   Result 2026-10-26 (login node makalu47): Python 3.12.15 and 3.11 (no 3.13), no module system, no scheduler, an RTX A5000 (24 GB, shared), driver 595.91.07 (CUDA 13.2), 57 TB free on `/scratch`, huggingface.co reachable.
 2. **Deploy the code** from a clean checkout: `./hpc_setup/deploy_to_cluster.sh`. It also copies `tests/`, `pytest.ini` and the requirement and constraint files, and writes `COMMIT` (the deployed commit and whether the checkout was dirty), which every `run.json` records.
 3. **Copy a snapshot** (private data; keep it on `/scratch`, never in a shared folder):
    ```bash
@@ -167,5 +168,6 @@ The harness (`scripts/run_harness.py`) runs from the same deployed copy, with it
    rsync -av ../../benchmark_data/snapshots/sensbee-2026-10-01 ruha6285@cslogin.tu-ilmenau.de:/scratch/ruha6285/benchmark_data/snapshots/
    ```
    The harness checks each file's SHA-256 against the manifest on load.
+3b. **Environment** on the login node (Python 3.12, the Mac's pins): `bash hpc_setup/setup_bench_cluster.sh`. It ends with a smoke import and freezes the result to `constraints-bench-cluster.txt`.
 4. **Pinned weights** on the login node, into `$HF_HOME`: `python hpc_setup/download_models.py --pinned chronos2 mistral7b llama2_7b` (Llama 2 needs its licence accepted on Hugging Face and `huggingface-cli login` first). Each file's SHA-256 is checked against the Hub.
 5. **Runs** on the GPU node with `HF_HUB_OFFLINE=1` and the same `scripts/run_harness.py` commands as on the Mac.
