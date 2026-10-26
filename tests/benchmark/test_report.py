@@ -8,6 +8,8 @@
 # - the common-origin report for a run on an origin subset
 # - for covariate runs (Phase 4): the skill per sensor group, the DM tests against the values-only run, and the
 #   oracle section
+# - Phase 6a: Holm's correction on the hand example of the examiner review, the day bootstrap's grouping by Berlin
+#   day, the family tests end to end, and the halls' open-slot coverage on a hand example
 # The report always runs the DM tests, which need statsmodels. So these tests run in the bench venv only.
 
 import json
@@ -22,7 +24,8 @@ pytest.importorskip("statsmodels")
 
 from benchmark.bands import widened_forecaster  # noqa: E402
 from benchmark.models.mask_models import recent_mask_forecaster  # noqa: E402
-from benchmark.report import dm_tests, make_report  # noqa: E402
+from benchmark.report import (FamilyTest, _berlin_days, day_bootstrap, dm_tests, holm,  # noqa: E402
+                              make_report)
 from benchmark.runner import naive_forecaster, run, seasonal_naive_forecaster  # noqa: E402
 from benchmark.snapshot import MANIFEST_NAME, write_raw_csv  # noqa: E402
 from benchmark.tasks import REPORT_STEPS, SensorTask  # noqa: E402
@@ -304,3 +307,96 @@ def test_oracle_runs_get_their_own_section(tmp_path):
     main, oracle = summary.split("# Oracle runs")
     assert "naive+met_oracle" not in main
     assert "| naive+met_oracle | 1d |" in oracle
+
+
+# The examiner review's example (Phase 4 RQ3, p 0.033 / 0.024 / 0.31): after Holm none is significant at 0.05.
+# By hand: sorted 0.024 × 3 = 0.072, 0.033 × 2 = 0.066 → raised to 0.072 (step-down keeps the order), 0.31 × 1.
+def test_holm_on_the_examiner_review_example():
+    adjusted, significant = holm(pd.Series([0.033, 0.024, 0.31]))
+    assert adjusted.tolist() == pytest.approx([0.072, 0.072, 0.31]) and not significant.any()
+
+
+# A declared test that couldn't be computed counts as p = 1: with it, 0.02 is multiplied by 2, not 1.
+def test_holm_keeps_an_uncomputable_test_in_the_family():
+    adjusted, significant = holm(pd.Series([0.02, np.nan]))
+    assert adjusted.iloc[0] == pytest.approx(0.04) and np.isnan(adjusted.iloc[1]) and significant.tolist() == [
+        True, False]
+
+
+# Origins are naive UTC; days are Berlin days: 23:00 UTC on 31 Jan is 00:00 on 1 Feb in Berlin (UTC+1 in winter).
+def test_bootstrap_resamples_whole_berlin_days():
+    origins = pd.DatetimeIndex(["2026-01-31 18:00", "2026-01-31 23:00", "2026-02-01 06:00"])
+    assert [str(d) for d in _berlin_days(origins)] == ["2026-01-31", "2026-02-01", "2026-02-01"]
+    # Every day holds the same four values (0, 0, 0, 8), so every day has mean 2: resampling whole days always gives 2
+    # (a zero-width interval), while resampling single origins would spread it.
+    values = pd.Series([0.0, 0.0, 0.0, 8.0] * 5, index=pd.date_range("2026-02-01", periods=20, freq="6h"))
+    assert day_bootstrap(values) == (2.0, 2.0, 2.0)
+
+
+# A family test end to end: naive against seasonal naive on both sensors, Holm within the family, the bootstrap
+# interval around the MASE difference, and families.csv plus its summary section.
+def test_family_tests_with_holm_and_bootstrap_interval(tmp_path):
+    snapshot_dir, tasks = _snapshot(tmp_path)
+    out = tmp_path / "runs"
+    runs = [run(seasonal_naive_forecaster(96), "snaive", snapshot_dir, out, tasks=tasks, context_days=(1,),
+                run_id="snaive"),
+            run(naive_forecaster, "naive", snapshot_dir, out, tasks=tasks, context_days=(1,), run_id="naive")]
+    report = make_report(runs, tmp_path / "reports", ("snaive", 1), tasks=tasks, report_id="r",
+                         families=[FamilyTest("F1", "naive", "1d", "snaive", "1d"),
+                                   FamilyTest("F9", "missing", "1d", "snaive", "1d")])
+    families = pd.read_csv(report / "families.csv").set_index("sensor")
+    assert set(families["family"]) == {"F1"} and set(families.index) == {"W", "V"}
+    assert families.loc["W", "statistic"] > 0  # naive is worse than seasonal naive on the daily pattern
+    w = families.loc["W"]
+    assert w["pvalue_holm"] >= w["pvalue"] and w["MASE_difference_low"] <= w["MASE_difference"] <= w[
+        "MASE_difference_high"]
+    cells = pd.read_csv(report / "cells.csv").set_index(["model", "sensor", "horizon_steps"])
+    assert w["MASE_difference"] == pytest.approx(cells.loc[("naive", "W", 96), "MASE"]
+                                                 - cells.loc[("snaive", "W", 96), "MASE"])
+    summary = (report / "summary.md").read_text()
+    assert "# Test families" in summary and "# Per-type results" in summary and "## weather:" in summary
+
+
+# Holm runs within each family: the same test in a second family of its own isn't corrected for the first family.
+def test_holm_is_applied_within_each_family(tmp_path):
+    snapshot_dir, tasks = _snapshot(tmp_path)
+    out, weather = tmp_path / "runs", {"W": tasks["W"]}
+    runs = [run(seasonal_naive_forecaster(96), "snaive", snapshot_dir, out, tasks=weather, context_days=(1,),
+                run_id="snaive"),
+            run(naive_forecaster, "naive", snapshot_dir, out, tasks=weather, context_days=(1,), run_id="naive"),
+            run(_negative_forecaster, "negative", snapshot_dir, out, tasks=weather, context_days=(1,),
+                run_id="negative")]
+    report = make_report(runs, tmp_path / "reports", ("snaive", 1), tasks=weather, report_id="r",
+                         families=[FamilyTest("F1", "naive", "1d", "snaive", "1d"),
+                                   FamilyTest("F1", "negative", "1d", "snaive", "1d"),
+                                   FamilyTest("F2", "naive", "1d", "snaive", "1d")])
+    families = pd.read_csv(report / "families.csv")
+    f1 = families[families["family"] == "F1"]
+    f2 = families[families["family"] == "F2"].iloc[0]
+    assert f2["pvalue_holm"] == pytest.approx(f2["pvalue"], rel=1e-9, abs=0)  # alone in its family (p ~ 1e-14)
+    assert (f1["pvalue_holm"] >= f1["pvalue"]).all() and f1["pvalue_holm"].max() > f1["pvalue"].min()
+
+
+# Halls' open-slot coverage by hand: visitors are 5 in UTC slots 0-47 and 0 in slots 48-95 every day, so the
+# 28-day profile marks exactly slots 0-47 open. An all-zero forecast covers every closed step (y = 0) and no open one:
+# COV80 = 0.5 over 24 h, COV80_open = 0, with 48 open steps per origin. The weather sensor gets no open-slot value.
+def test_open_slot_coverage_by_hand(tmp_path):
+    visitors = np.tile(np.r_[np.full(48, 5.0), np.zeros(48)], len(TIMES) // 96)
+    snapshot_dir, tasks = _snapshot(tmp_path, visitors=visitors)
+
+    def zeros(contexts, horizon, levels, seed):
+        return np.zeros((len(contexts), horizon, len(levels))), ["ok"] * len(contexts)
+
+    out = tmp_path / "runs"
+    runs = [run(seasonal_naive_forecaster(96), "snaive", snapshot_dir, out, tasks=tasks, context_days=(1,),
+                run_id="snaive"),
+            run(zeros, "zeros", snapshot_dir, out, tasks=tasks, context_days=(1,), run_id="zeros")]
+    report = make_report(runs, tmp_path / "reports", ("snaive", 1), tasks=tasks, report_id="r",
+                         snapshot_dir=snapshot_dir)
+    cells = pd.read_csv(report / "cells.csv").set_index(["model", "sensor", "horizon_steps"])
+    v = cells.loc[("zeros", "V", 96)]
+    assert v["COV80"] == pytest.approx(0.5) and v["COV80_open"] == 0.0 and v["n_open_steps"] == 48 * 13
+    assert np.isnan(cells.loc[("zeros", "W", 96), "COV80_open"])
+    with pytest.raises(ValueError, match="NOT THE RUNS' SNAPSHOT"):
+        make_report(runs, tmp_path / "reports", ("snaive", 1), tasks=tasks, report_id="r2",
+                    snapshot_dir=_snapshot(tmp_path, name="other")[0])
