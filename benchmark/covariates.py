@@ -22,13 +22,28 @@
 # - School holidays: KMK "Ferien im Schuljahr 2025/2026", Thüringen row, Stand 09.10.2025
 #   (kmk.org/fileadmin/Dateien/pdf/Ferienkalender/FER2025_26.pdf, checked 2026-10-14).
 #   The table gives the first and last holiday day. 15.05.2026 is a school-free day.
+#   Extended 2026-10-26 (Phase 6a) to 2025-07-01 .. 2027-04-01: KMK "Ferien im Schuljahr 2024/2025", Thüringen row,
+#   Stand 17.05.2023 (FER2024_25.pdf: summer 28.06.-08.08.2025) and "Ferien im Schuljahr 2026/2027", Thüringen row,
+#   Stand 09.10.2025 (FER2026_27.pdf: autumn 12.10.-24.10.2026, Christmas 23.12.2026-02.01.2027,
+#   winter 01.02.-06.02.2027, Easter 22.03.-03.04.2027), both checked 2026-10-26. Easter 2027 is 28 March.
 # Solar elevation: NOAA Global Monitoring Division, "General Solar Position Calculations" (gml.noaa.gov/grad/solcalc/
 # solareqns.PDF, checked 2026-10-14). It is computed at one point for Ilmenau (de.wikipedia.org/wiki/Ilmenau:
 # 50.687 N, 10.914 E, checked 2026-10-14). The weather stations lie within about 10 km, which moves the sun angle by
 # a fraction of a degree.
 # The opening profile (D4-1): per Berlin weekday and 15-min local slot, the share of days with visitors_total > 0.
 # It is taken from the hall's training data before the cutoff (from task.train_start, without the task's exclusions).
-# It is fitted once per sensor and period, like a trained model.
+# It is fitted once per sensor and period, like a trained model. Every forecast window uses that cutoff profile
+# (all of it lies before the origin).
+# A trained model's training rows get a profile from earlier weeks only (D-E8, 2026-10-22; training_open_share):
+# otherwise a training row's own day would be part of its feature. Training starts where every known covariate is
+# defined (training_covariates), so the first days, with no earlier week of that weekday, are left out.
+# Phase 6a sets (fixed 2026-10-26, before any run):
+# - "stations96" (weather): the other stations' temperature 96 steps (24 h) earlier, forward-filled. At a future step
+#   t it holds a value from before t - 96 steps, which is before the origin, so it is known for the whole horizon.
+#   It gives a model without a past-covariate input (AutoGluon's tabular models drop past covariates) the neighbours.
+# - "wx" (halls): temperature and precipitation_rate (past) as an input for the visitor counts: Manebach's, and in
+#   each 15-min bucket Manebach lacks, Stützerbach's, else Frauenwald's (owner decision 2026-10-26: no single station
+#   covers both halls' windows; Manebach misses much of Dec 2025-Jan 2026). The share from each station is recorded.
 # series_open_profile() computes the same share from any series. Phase 5 uses it on each 28-day context, because the
 # service can compute that profile without knowing when a season starts (D5-2).
 
@@ -47,19 +62,28 @@ logger = logging.getLogger(__name__)
 KINDS = ("known", "past", "oracle")
 BERLIN = "Europe/Berlin"
 ILMENAU = (50.687222, 10.914167)  # latitude, longitude (degrees north, east)
-HOLIDAYS_FROM, HOLIDAYS_TO = pd.Timestamp("2025-10-01"), pd.Timestamp("2026-10-01")  # [from, to), Berlin dates
+HOLIDAYS_FROM, HOLIDAYS_TO = pd.Timestamp("2025-07-01"), pd.Timestamp("2027-04-01")  # [from, to), Berlin dates
 PUBLIC_HOLIDAYS = tuple(pd.Timestamp(d) for d in (
-    "2025-10-03", "2025-10-31", "2025-12-25", "2025-12-26", "2026-01-01", "2026-04-03", "2026-04-06", "2026-05-01",
-    "2026-05-14", "2026-05-25", "2026-09-20"))
+    "2025-09-20", "2025-10-03", "2025-10-31", "2025-12-25", "2025-12-26", "2026-01-01", "2026-04-03", "2026-04-06",
+    "2026-05-01", "2026-05-14", "2026-05-25", "2026-09-20", "2026-10-03", "2026-10-31", "2026-12-25", "2026-12-26",
+    "2027-01-01", "2027-03-26", "2027-03-29"))
 SCHOOL_HOLIDAYS = tuple((pd.Timestamp(a), pd.Timestamp(b)) for a, b in (  # first and last day, inclusive
+    ("2025-06-28", "2025-08-08"),
     ("2025-10-06", "2025-10-18"), ("2025-12-22", "2026-01-03"), ("2026-02-16", "2026-02-21"),
-    ("2026-04-07", "2026-04-17"), ("2026-05-15", "2026-05-15"), ("2026-07-04", "2026-08-14")))
+    ("2026-04-07", "2026-04-17"), ("2026-05-15", "2026-05-15"), ("2026-07-04", "2026-08-14"),
+    ("2026-10-12", "2026-10-24"), ("2026-12-23", "2027-01-02"), ("2027-02-01", "2027-02-06"),
+    ("2027-03-22", "2027-04-03")))
 WEATHER_VARIABLES = ("humidity", "global_radiation", "pressure_rel", "wind_speed_avg")  # fixed before any run
 STATIONS = tuple(name for name, task in TASKS.items() if task.kind == "regular")
+HALL_WEATHER_STATIONS = ("MANEBACH_WEATHER_STATION",       # inside Ilmenau; its gaps are filled from the others
+                         "STUTZERBACH_WEATHER_STATION", "FRAUENWALD_WEATHER_STATION")
+HALL_WEATHER_VARIABLES = ("temperature", "precipitation_rate")  # fixed 2026-10-26, before any run
+LAG_STEPS = 96                                            # stations96: the neighbours 24 h earlier
 CALENDAR = ("tod_sin", "tod_cos", "dow_sin", "dow_cos", "public_holiday", "school_holiday")
 SUN = ("tod_sin", "tod_cos", "solar_elevation")
+# The kind of every column a feature group produces.
 GROUP_KINDS = {"calendar": "known", "open": "known", "sun": "known", "met": "past", "stations": "past",
-               "met_oracle": "oracle"}  # the kind of every column a feature group produces
+               "met_oracle": "oracle", "stations96": "known", "wx": "past"}
 
 
 # A named covariate set: the task kind it applies to ("visitors" or "regular") and its feature groups.
@@ -86,6 +110,9 @@ COVARIATE_SETS: dict[str, CovariateSet] = {
     "met": CovariateSet("regular", ("sun", "met")),
     "stations": CovariateSet("regular", ("sun", "stations")),
     "met_oracle": CovariateSet("regular", ("sun", "met_oracle")),
+    "stations96": CovariateSet("regular", ("sun", "stations96")),   # Phase 6a sets (header)
+    "wx": CovariateSet("visitors", ("wx",)),
+    "cal_open_wx": CovariateSet("visitors", ("calendar", "open", "wx")),
 }
 
 
@@ -163,6 +190,38 @@ def open_profile(series: pd.Series, task: SensorTask, cutoff: pd.Timestamp) -> n
     return series_open_profile(history[~_excluded(history.index, task)])
 
 
+# Opening-profile values of training rows from earlier weeks only (D-E8): a row in Berlin week w (Monday to Sunday)
+# gets the share of days with visitors > 0 in its weekday and slot over the hall's training data (from
+# task.train_start, without the exclusions, before the cutoff) in the weeks before w. NaN where that weekday and slot
+# have no earlier day, and for rows outside the training weeks.
+def training_open_share(series: pd.Series, task: SensorTask, cutoff: pd.Timestamp,
+                        index: pd.DatetimeIndex) -> np.ndarray:
+    history = training_history(series, task, cutoff)
+    history = history[~_excluded(history.index, task)]
+
+    def weeks(idx: pd.DatetimeIndex) -> pd.DatetimeIndex:
+        local = berlin(idx).tz_localize(None).normalize()
+        return local - pd.to_timedelta(local.weekday, unit="D")
+
+    starts = pd.DatetimeIndex(sorted(set(weeks(history.index))))
+    weekday, slot = _local_slots(history.index)
+    position = starts.get_indexer(weeks(history.index))
+    opened = np.zeros((len(starts), 7, 96))
+    days = np.zeros((len(starts), 7, 96))
+    np.add.at(opened, (position, weekday, slot), (history.to_numpy() > 0).astype(float))
+    np.add.at(days, (position, weekday, slot), 1.0)
+    before_opened = np.cumsum(opened, axis=0) - opened  # weeks strictly before each week
+    before_days = np.cumsum(days, axis=0) - days
+    with np.errstate(invalid="ignore", divide="ignore"):
+        share = np.where(before_days > 0, before_opened / before_days, np.nan)
+    row_weekday, row_slot = _local_slots(index)
+    row_position = starts.get_indexer(weeks(index))
+    out = np.full(len(index), np.nan)
+    inside = row_position >= 0
+    out[inside] = share[row_position[inside], row_weekday[inside], row_slot[inside]]
+    return out
+
+
 # The profile value of each timestamp (its Berlin weekday and slot).
 def open_share(index: pd.DatetimeIndex, profile: np.ndarray) -> np.ndarray:
     weekday, slot = _local_slots(index)
@@ -173,10 +232,20 @@ def open_share(index: pd.DatetimeIndex, profile: np.ndarray) -> np.ndarray:
 # inside the holiday table), the kind of each column, and info for run.json (the opening profile).
 # cutoff: the period start, where the opening profile is fitted.
 # Weather columns are SensBee AVG buckets, unfilled. The runner checks that the set matches the sensor's task kind.
+# span: [start, end) over which the stations96 observed shares and the wx source shares are recorded (the runner
+# passes the evaluated windows; None = the whole frame).
 def build(name: str, sensor: str, frames: dict[str, pd.DataFrame], series: pd.Series, task: SensorTask,
-          cutoff: pd.Timestamp) -> tuple[pd.DataFrame, dict[str, str], dict]:
+          cutoff: pd.Timestamp,
+          span: Optional[tuple[pd.Timestamp, pd.Timestamp]] = None) -> tuple[pd.DataFrame, dict[str, str], dict]:
     spec = COVARIATE_SETS[name]
     index = series.index
+
+    # Share of True in a boolean series over the span.
+    def share(flags: pd.Series) -> float:
+        if span is not None:
+            flags = flags[(flags.index >= span[0]) & (flags.index < span[1])]
+        return round(float(flags.mean()), 4)
+
     if "calendar" in spec.groups:
         local_days = berlin(index).tz_localize(None).normalize()
         index = index[(local_days >= HOLIDAYS_FROM) & (local_days < HOLIDAYS_TO)]
@@ -205,6 +274,25 @@ def build(name: str, sensor: str, frames: dict[str, pd.DataFrame], series: pd.Se
                     column = f"temperature_{station}"
                     columns[column] = bucket_15min(frames[station], "temperature", "AVG").reindex(index).to_numpy()
                     kinds[column] = GROUP_KINDS[group]
+        elif group == "stations96":
+            grid = pd.date_range(index[0], index[-1], freq=BUCKET_FREQ)
+            for station in STATIONS:
+                if station != sensor:
+                    column = f"temperature_{station}_lag{LAG_STEPS}"
+                    lagged = bucket_15min(frames[station], "temperature", "AVG").reindex(grid).shift(LAG_STEPS)
+                    info.setdefault("lagged_observed_share", {})[column] = share(lagged.notna())
+                    columns[column] = lagged.ffill().reindex(index).to_numpy()  # earlier values only
+                    kinds[column] = GROUP_KINDS[group]
+        elif group == "wx":
+            for variable in HALL_WEATHER_VARIABLES:
+                column, combined, sources = f"hall_{variable}", pd.Series(np.nan, index=index), {}
+                for station in HALL_WEATHER_STATIONS:
+                    values = bucket_15min(frames[station], variable, "AVG").reindex(index)
+                    fill = combined.isna() & values.notna()
+                    sources[station] = share(fill)
+                    combined[fill] = values[fill]
+                info.setdefault("hall_weather_sources", {})[column] = sources
+                columns[column], kinds[column] = combined.to_numpy(), GROUP_KINDS[group]
     return pd.DataFrame(columns, index=index), kinds, info
 
 
@@ -234,7 +322,24 @@ def coverage(frame: pd.DataFrame, kinds: dict[str, str], start: pd.Timestamp, en
 
 
 # Known columns of a covariate frame strictly before the cutoff: what a trainer may use for its training items.
-def training_covariates(frame: pd.DataFrame, kinds: dict[str, str],
-                        cutoff: pd.Timestamp) -> Optional[pd.DataFrame]:
+# open_share is replaced by its earlier-weeks values (training_open_share, D-E8).
+# The frame starts at its first row where every column is defined, and the trainer's items are cut to it
+# (runner._fit). A gap after that start is an error.
+# series, task: the sensor's target and task, needed only when the frame has open_share.
+def training_covariates(frame: pd.DataFrame, kinds: dict[str, str], cutoff: pd.Timestamp,
+                        series: Optional[pd.Series] = None,
+                        task: Optional[SensorTask] = None) -> Optional[pd.DataFrame]:
     known = [column for column, kind in kinds.items() if kind == "known"]
-    return frame.loc[: cutoff - STEP, known] if known else None
+    if not known:
+        return None
+    rows = frame.loc[: cutoff - STEP, known].copy()
+    if "open_share" in known:
+        rows["open_share"] = training_open_share(series, task, cutoff, rows.index)
+    defined = rows.notna().all(axis=1).to_numpy()
+    if not defined.any():
+        raise ValueError("NO TRAINING ROW HAS EVERY KNOWN COVARIATE")
+    rows = rows.iloc[int(np.argmax(defined)):]
+    if rows.isna().any().any():
+        missing = rows.columns[rows.isna().any()].tolist()
+        raise ValueError(f"KNOWN COVARIATES MISSING inside the training rows: {missing}")
+    return rows

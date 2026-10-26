@@ -11,6 +11,9 @@
 #   the base forecast untouched elsewhere
 # - its Phase 5 form (D5-2), whose profile comes from each context: hand-checked shares of 4 Mondays, and a run
 #   without any covariate set
+# - Phase 6a: the holiday table to 2027-04-01; training rows' opening profile from earlier weeks only (D-E8) and the
+#   training items starting where it is defined; "stations96" (neighbours 24 h earlier, known) and "wx" (Manebach
+#   weather for the halls, past) leak nothing at or after the origin
 
 import json
 from datetime import date, timedelta
@@ -79,19 +82,22 @@ def test_holiday_flags_follow_the_berlin_date():
 
 def test_the_easter_holidays_of_the_table_match_the_computed_easter():
     easter = _easter(2026)
-    assert easter == date(2026, 4, 5)
+    assert easter == date(2026, 4, 5) and _easter(2027) == date(2027, 3, 28)
     moving = {easter + timedelta(days=d) for d in (-2, 1, 39, 50)}  # Good Friday, Easter Monday, Ascension, Whit Monday
+    moving |= {_easter(2027) + timedelta(days=d) for d in (-2, 1)}  # the table ends 2027-04-01, before Ascension 2027
     table = {t.date() for t in cov.PUBLIC_HOLIDAYS}
     assert moving <= table
-    assert table - moving == {date(2025, 10, 3), date(2025, 10, 31), date(2025, 12, 25), date(2025, 12, 26),
-                              date(2026, 1, 1), date(2026, 5, 1), date(2026, 9, 20)}
+    fixed = {(9, 20), (10, 3), (10, 31), (12, 25), (12, 26), (1, 1), (5, 1)}  # ThürFGtG § 2(1)
+    expected = {date(y, m, d) for y in (2025, 2026, 2027) for m, d in fixed
+                if cov.HOLIDAYS_FROM <= pd.Timestamp(date(y, m, d)) < cov.HOLIDAYS_TO}
+    assert table - moving == expected
 
 
 def test_calendar_refuses_dates_outside_the_holiday_table():
     with pytest.raises(ValueError, match="OUTSIDE THE HOLIDAY TABLE"):
-        cov.calendar(pd.DatetimeIndex(["2025-09-30 12:00"]))
+        cov.calendar(pd.DatetimeIndex(["2025-06-30 12:00"]))
     with pytest.raises(ValueError, match="OUTSIDE THE HOLIDAY TABLE"):
-        cov.calendar(pd.DatetimeIndex(["2026-09-30 22:30"]))  # 00:30 CEST on 1 Oct
+        cov.calendar(pd.DatetimeIndex(["2027-03-31 22:30"]))  # 00:30 CEST on 1 Apr
 
 
 # At solar noon the elevation is 90° − latitude + declination. The declination is ±23.44° at the solstices.
@@ -330,3 +336,99 @@ def test_a_recent_mask_run_needs_no_covariate_set(tmp_path):
     assert open_slot.any() and (forecasts.loc[open_slot, "q0.5"] == 7.0).all()
     assert (forecasts.loc[~open_slot, [f"q{q:g}" for q in QUANTILE_LEVELS]] == 0).all().all()
     assert json.loads((run_dir / "run.json").read_text())["covariates"] is None
+
+
+def test_the_extended_holiday_table_flags_both_school_years():
+    index = pd.DatetimeIndex(["2025-07-15 12:00", "2025-08-09 12:00", "2026-12-31 12:00", "2027-01-04 12:00",
+                              "2027-02-01 12:00", "2027-03-26 12:00"])
+    features = cov.calendar(index)
+    assert features["school_holiday"].tolist() == [1, 0, 1, 0, 1, 1]
+    assert features["public_holiday"].tolist() == [0, 0, 0, 0, 0, 1]  # Good Friday 2027
+
+
+# D-E8 by hand on the Monday pattern (5 visitors 09:00-10:00 Berlin), with the Monday of 19 January closed.
+# A Monday 09:00 row gets the share of open Mondays in the weeks before its own: 5 Jan has no earlier Monday (NaN),
+# 12 Jan → 1 (5 Jan), 19 Jan → 1 (its own closed day doesn't count), 26 Jan → 2/3. The cutoff profile would give
+# every one of them 3/4.
+def test_training_rows_get_the_opening_profile_of_earlier_weeks_only():
+    task = SensorTask("visitors_total", "MAX", "visitors", "2026-02-01", "2026-02-05", train_start="2026-01-03")
+    raw = _visitor_raw()
+    raw.loc[(raw["created_at"] >= "2026-01-19") & (raw["created_at"] < "2026-01-20"), "visitors_total"] = 0.0
+    series = target_series(raw, task)
+    mondays = pd.DatetimeIndex(["2026-01-05 08:00", "2026-01-12 08:00", "2026-01-19 08:00", "2026-01-26 08:00"])
+    share = cov.training_open_share(series, task, pd.Timestamp("2026-01-31"), mondays)
+    assert np.isnan(share[0]) and share[1:].tolist() == pytest.approx([1.0, 1.0, 2 / 3])
+    assert cov.open_profile(series, task, pd.Timestamp("2026-01-31"))[0, 36] == pytest.approx(3 / 4)
+
+
+# The runner hands a cal_open trainer the earlier-weeks profile and starts its items where every known column is
+# defined: 10 Jan 00:00 UTC. Monday to Friday of the week of 5 Jan have no earlier day of their weekday, and neither
+# do Saturday 10 Jan's first local slots (9 Jan 23:00-23:45 UTC), because train_start, 3 Jan 00:00 UTC, is 01:00 in
+# Berlin. 7 days of items are dropped.
+def test_a_cal_open_trainer_gets_earlier_weeks_and_trimmed_items(tmp_path):
+    snapshot_dir, tasks = _visitor_snapshot(tmp_path)
+    received = []
+
+    def trainer(sensor, items, seed, covariates):
+        received.append((items, covariates))
+        return _recording_forecaster([]), {}
+
+    run_dir = run(None, "t+cal_open", snapshot_dir, tmp_path / "runs", tasks=tasks, context_days=(1,),
+                  trainer=trainer, covariates="cal_open")
+    ((items, frame),) = received
+    start = pd.Timestamp("2026-01-10 00:00")
+    assert frame.index[0] == start and items[0].index[0] == start and frame.notna().all().all()
+    series = target_series(_visitor_raw(), tasks["V"])
+    expected = cov.training_open_share(series, tasks["V"], pd.Timestamp("2026-02-01"), frame.index)
+    assert np.array_equal(frame["open_share"].to_numpy(), expected)
+    fit = json.loads((Path(run_dir) / "run.json").read_text())["counts"]["V"]["fit"]
+    assert fit["covariates_from"].startswith("2026-01-10T00:00") and fit["steps_before_covariates"] == 7 * 96
+
+
+# stations96: at a future step t the neighbour column holds that station's last temperature at or before t - 96
+# steps, and raising every raw value at or after the origin changes nothing in the window. The neighbour has a gap
+# from 30 h before to 2 h after the origin, so filling backwards, or shifting by 96 observations instead of 24 h,
+# would fail.
+def test_stations96_holds_the_neighbours_a_day_earlier_and_leaks_nothing():
+    origin = pd.Timestamp("2026-02-02 06:00")
+    neighbour = "FRAUENWALD_WEATHER_STATION"
+    frames = {s: _weather_raw(i) for i, s in enumerate(cov.STATIONS)}
+    gap = (frames[neighbour]["created_at"] >= origin - pd.Timedelta("30h")) & (
+        frames[neighbour]["created_at"] < origin + pd.Timedelta("2h"))
+    frames[neighbour] = frames[neighbour][~gap]
+    changed = {}
+    for station, raw in frames.items():
+        later = raw.copy()
+        later.loc[later["created_at"] >= origin, "temperature"] += 1000.0
+        changed[station] = later
+    window = _window("stations96", frames, origin)
+    pd.testing.assert_frame_equal(window, _window("stations96", changed, origin))
+    column = f"temperature_{neighbour}_lag96"
+    raw = frames[neighbour].set_index("created_at")["temperature"].reindex(TIMES).ffill()
+    future = window.loc[origin:, column]
+    assert np.allclose(future.to_numpy(), raw.reindex(future.index - pd.Timedelta("1D")).to_numpy())
+    assert column in window.attrs["future_columns"] and window[column].notna().all()
+
+
+# wx: a hall gets Manebach's temperature and precipitation rate, Stützerbach's where Manebach has none, as past-only
+# columns blanked after the origin.
+def test_wx_gives_a_hall_the_station_weather_as_past_only():
+    origin = pd.Timestamp("2026-02-02 06:00")
+    manebach = _weather_raw().assign(precipitation_rate=0.5)
+    manebach = manebach[(manebach["created_at"] < "2026-01-20") | (manebach["created_at"] >= "2026-01-21")]
+    stutzerbach = _weather_raw(100.0).assign(precipitation_rate=7.0)
+    frames = {"V": _visitor_raw(), "MANEBACH_WEATHER_STATION": manebach, "STUTZERBACH_WEATHER_STATION": stutzerbach,
+              "FRAUENWALD_WEATHER_STATION": _weather_raw(200.0).assign(precipitation_rate=9.0)}
+    task = SensorTask("visitors_total", "MAX", "visitors", "2026-02-01", "2026-02-05", train_start="2026-01-03")
+    frame, kinds, info = cov.build("wx", "V", frames, target_series(_visitor_raw(), task), task,
+                                   pd.Timestamp("2026-02-01"))
+    assert kinds == {"hall_temperature": "past", "hall_precipitation_rate": "past"}
+    assert (frame.loc["2026-01-20", "hall_precipitation_rate"] == 7.0).all()  # Manebach's gap, from Stützerbach
+    assert (frame.loc["2026-01-21", "hall_precipitation_rate"] == 0.5).all()
+    assert info["hall_weather_sources"]["hall_temperature"]["STUTZERBACH_WEATHER_STATION"] == pytest.approx(1 / 40)
+    _, _, day = cov.build("wx", "V", frames, target_series(_visitor_raw(), task), task, pd.Timestamp("2026-02-01"),
+                          (pd.Timestamp("2026-01-20"), pd.Timestamp("2026-01-21")))  # shares over the span only
+    assert day["hall_weather_sources"]["hall_temperature"]["STUTZERBACH_WEATHER_STATION"] == 1.0
+    context_index = pd.date_range(origin - pd.Timedelta("1D"), origin, freq="15min", inclusive="left")
+    window = cov.covariate_window(frame, kinds, origin, context_index)
+    assert window.loc[origin:].isna().all().all() and window.loc[:origin - pd.Timedelta("15min")].notna().all().all()

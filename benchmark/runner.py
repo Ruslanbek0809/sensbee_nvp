@@ -50,9 +50,9 @@ from benchmark.snapshot import (
     BUCKET_FREQ, BUCKETS_PER_DAY, MANIFEST_NAME, TIME_FORMAT, git_state, load_snapshot, sha256_file, write_raw_csv,
 )
 from benchmark.tasks import (
-    CLOSURE_GAP_BUCKETS, CONTEXT_DAYS, GUARD, HORIZON, MIN_CONTEXT_COVERAGE, ORIGIN_FREQ, QUANTILE_LEVELS,
-    REPORT_STEPS, SCALE_DAYS, SEASON, TASKS, VALIDATION_DAYS, SensorTask, context_window, origin_table, period_bounds,
-    scale_history, target_series, target_window, training_items, validity_context_days,
+    CLOSURE_GAP_BUCKETS, CONTEXT_DAYS, GUARD, HORIZON, MIN_CONTEXT_COVERAGE, MIN_TRAIN_DAYS, ORIGIN_FREQ,
+    QUANTILE_LEVELS, REPORT_STEPS, SCALE_DAYS, SEASON, TASKS, VALIDATION_DAYS, SensorTask, context_window,
+    origin_table, period_bounds, scale_history, target_series, target_window, training_items, validity_context_days,
 )
 
 logger = logging.getLogger(__name__)
@@ -188,12 +188,21 @@ def _plain_json(value: object) -> object:
 # - the forecaster, or None when the trainer raised or returned fit info that isn't JSON (this is checked now, not
 #   when run.json is written after all the forecasts);
 # - the fit record for run.json: cutoff, items, steps, span, fit seconds and the trainer's info.
+# With known covariates, the items start at the covariates' first row (covariates.training_covariates; pieces that
+# get shorter than MIN_TRAIN_DAYS are dropped), and the steps this drops are recorded.
 def _fit(trainer: Trainer, sensor: str, series: pd.Series, task: SensorTask, cutoff: pd.Timestamp,
          seed: int, covariates: Optional[pd.DataFrame] = None) -> tuple[Optional[Forecaster], dict]:
     items = training_items(series, task, cutoff)
+    extra = {}
+    if covariates is not None:
+        before = sum(len(i) for i in items)
+        items = [i.loc[covariates.index[0]:] for i in items]
+        items = [i for i in items if len(i) >= MIN_TRAIN_DAYS * BUCKETS_PER_DAY]
+        extra = {"covariates_from": covariates.index[0].strftime(TIME_FORMAT),
+                 "steps_before_covariates": int(before - sum(len(i) for i in items))}
     record = {"cutoff": cutoff.strftime(TIME_FORMAT), "items": len(items), "steps": int(sum(len(i) for i in items)),
               "first": items[0].index[0].strftime(TIME_FORMAT) if items else None,
-              "last": items[-1].index[-1].strftime(TIME_FORMAT) if items else None}
+              "last": items[-1].index[-1].strftime(TIME_FORMAT) if items else None, **extra}
     started = time.perf_counter()
     try:
         if covariates is None:
@@ -256,15 +265,15 @@ def run(forecaster: Optional[Forecaster], model: str, snapshot_dir: Path, out_ro
         start, end = period_bounds(task, period)
         frame, kinds = None, {}
         if covariates is not None:
-            frame, kinds, info = cov.build(covariates, sensor, frames, series, task, start)
             longest = pd.Timedelta(days=max(validity_context_days(context_days)))
+            frame, kinds, info = cov.build(covariates, sensor, frames, series, task, start, (start - longest, end))
             counts[sensor]["covariates"] = {"columns": kinds,
                                             "coverage": cov.coverage(frame, kinds, start - longest, end), **info}
         sensor_forecaster = forecaster
         if trainer is not None and origins:
             sensor_forecaster, counts[sensor]["fit"] = _fit(
                 trainer, sensor, series, task, start, seed,
-                None if frame is None else cov.training_covariates(frame, kinds, start))
+                None if frame is None else cov.training_covariates(frame, kinds, start, series, task))
         for days in context_days:
             label = "all" if days is None else f"{days}d"
             contexts = [context_window(series, origin, None if days is None else days * BUCKETS_PER_DAY)
