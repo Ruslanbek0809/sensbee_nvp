@@ -19,7 +19,7 @@
 #   GATE=1 nohup bash hpc_setup/jobs/finetune_validation.sh /scratch/ruha6285/benchmark_data > <log> 2>&1 &
 set -eo pipefail
 shopt -s inherit_errexit  # a failed run inside $(...) also stops the job
-MAC_RUN_NAME=2026-10-14T222254Z_chronos2  # zero-shot Chronos-2 validation run from the Mac (copied for gate E)
+MAC_RUN_NAME=2026-10-14T222254Z_chronos2  # zero-shot Chronos-2 validation run from the Mac (in mac_runs/, gate E)
 if [ $# -ne 1 ] || [ ! -f "$1/snapshots/sensbee-2026-10-01/manifest.json" ]; then
     echo "USAGE (on the GPU node): bash hpc_setup/jobs/finetune_validation.sh <benchmark_data folder>"
     echo "  the benchmark_data folder must hold snapshots/sensbee-2026-10-01"
@@ -85,11 +85,11 @@ run_job() {
 }
 
 if [ "${GATE:-0}" = 1 ]; then
-    if [ ! -f "$DATA/results/$MAC_RUN_NAME/run.json" ]; then
-        echo "GATE Z NEEDS THE MAC RUN $DATA/results/$MAC_RUN_NAME (copied for gate E)"; exit 1
+    if [ ! -f "$DATA/mac_runs/$MAC_RUN_NAME/run.json" ]; then
+        echo "GATE Z NEEDS THE MAC RUN $DATA/mac_runs/$MAC_RUN_NAME (copied for gate E)"; exit 1
     fi
     zero=$(run_one chronos2_ft_lr0 --sensors $POOLED_SENSORS); echo "$zero"
-    venv-bench/bin/python scripts/compare_runs.py "$DATA/results/$MAC_RUN_NAME" "$(echo "$zero" | head -1 | awk '{print $NF}')" \
+    venv-bench/bin/python scripts/compare_runs.py "$DATA/mac_runs/$MAC_RUN_NAME" "$(echo "$zero" | head -1 | awk '{print $NF}')" \
         --contexts 28d && echo "GATE Z PASSED" || { echo "GATE Z FAILED"; exit 1; }
     first=$(run_job "${JOBS[0]}"); echo "$first"
     second=$(run_job "${JOBS[0]}"); echo "$second"
