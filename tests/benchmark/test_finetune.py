@@ -7,6 +7,8 @@
 # - learning rate 0 gives exactly the zero-shot forecasts (gate Z: the wrapper changes nothing but the weights), also
 #   when training ran in bf16 as on an A100 (accelerate's bf16-autocast forward must not stay on the model; bf16 is
 #   forced here on the CPU, where accelerate wraps the forward the same way)
+# - torch's float32 precision settings are the same after a fit as before, also when the fit switched TF32 on
+#   globally (as transformers does with bf16 on an A100), and the fine-tuned model forecasts on the CPU
 # - micro-batches with gradient accumulation (batch 4 as 2 x 2) run the configured number of optimizer steps
 # - the 8 grid configs are named in the "chronos2_ft" family; the gate config is not
 # They need the Chronos-2 weights in the local Hugging Face cache and never download them. Run in the bench venv with
@@ -82,6 +84,24 @@ def test_learning_rate_zero_gives_the_zero_shot_forecasts(make_contexts, monkeyp
     tuned = _fine_tuned(make_contexts, "full", 0.0)[0](contexts, HORIZON, QUANTILE_LEVELS, 0)[0]
     zero_shot = ZERO_SHOT["chronos2"].build()[0](contexts, HORIZON, QUANTILE_LEVELS, 0)[0]
     np.testing.assert_array_equal(tuned, zero_shot)
+
+
+def test_a_fit_leaves_the_float32_precision_as_it_was_and_forecasts_on_the_cpu(make_contexts, monkeypatch):
+    from chronos.chronos2.pipeline import Chronos2Pipeline
+    fit = Chronos2Pipeline.fit
+
+    # transformers' enable_tf32(True) on torch >= 2.9 sets the global setting, which fit() doesn't restore
+    def fit_with_global_tf32(self, *args, **kwargs):
+        torch.backends.fp32_precision = "tf32"
+        return fit(self, *args, **kwargs)
+
+    monkeypatch.setattr(Chronos2Pipeline, "fit", fit_with_global_tf32)
+    before = (torch.backends.fp32_precision, torch.backends.cuda.matmul.fp32_precision,
+              torch.backends.cudnn.fp32_precision)
+    _, info, _ = _fine_tuned(make_contexts, "full", 0.0)
+    after = (torch.backends.fp32_precision, torch.backends.cuda.matmul.fp32_precision,
+             torch.backends.cudnn.fp32_precision)
+    assert after == before and info["forecast_device"] == "cpu"
 
 
 def test_micro_batches_accumulate_into_the_configured_optimizer_steps(make_contexts):

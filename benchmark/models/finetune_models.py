@@ -10,6 +10,13 @@
 #   prepare_model, accelerate 1.15.0) and nothing undoes it, so the fine-tuned model would forecast in bf16. The
 #   trainer removes the wrapper, so forecasts are float32 like the zero-shot ones.
 # - get_peft_model draws LoRA's random A matrices before the Trainer seeds, so the trainer seeds first itself.
+# - TF32: with bf16, transformers 5.14.1 switches it on through the global torch.backends.fp32_precision (torch >= 2.9),
+#   but fit() restores only the cuda.matmul and cudnn settings, which default to "none" (= follow the global one). So
+#   TF32 stayed on after a fit (gate Z on the A100, 2026-10-27: quantiles up to 0.265 off). The trainer restores all
+#   three settings.
+# - Forecasts run on the CPU (owner decision 2026-10-27): the fine-tuned model is moved there after training, so it
+#   forecasts with the same code and device as every zero-shot Chronos-2 run, and the zero-shot runs are the F7
+#   comparator as they are.
 # - Library defaults kept and recorded: linear learning-rate decay, no warmup, AdamW (fused), min_past = the horizon,
 #   LoRA r 8 / alpha 16 on the attention q/k/v/o and the output layer. On a GPU with compute capability >= 8 (A100),
 #   fit() trains in bf16 with tf32 and restores tf32 when it returns; forecasts are float32.
@@ -90,6 +97,8 @@ def chronos2_finetune_trainer(model_id: str, revision: str, mode: str, learning_
 
         if device == "cuda":
             torch.cuda.reset_peak_memory_stats()
+        precision = (torch.backends.fp32_precision, torch.backends.cuda.matmul.fp32_precision,
+                     torch.backends.cudnn.fp32_precision)
         started = time.perf_counter()
         set_seed(seed)  # LoRA's A matrices are drawn before the Trainer seeds
         with tempfile.TemporaryDirectory(prefix="chronos2_ft_") as workdir:
@@ -101,13 +110,20 @@ def chronos2_finetune_trainer(model_id: str, revision: str, mode: str, learning_
                              disable_tqdm=True)
         tuned.model.__dict__.pop("forward", None)  # accelerate's bf16-autocast forward: back to the model's own
         tuned.model.__dict__.pop("_original_forward", None)
+        torch.backends.fp32_precision = precision[0]  # the global setting first: the others may follow it
+        torch.backends.cuda.matmul.fp32_precision, torch.backends.cudnn.fp32_precision = precision[1:]
         tuned.model.eval()
+        tuned.model.to("cpu")
+        peak = round(torch.cuda.max_memory_allocated() / 2**20) if device == "cuda" else None
+        del base
+        if device == "cuda":
+            torch.cuda.empty_cache()
         logger.info(f"FINE-TUNED Chronos-2 ({mode}, lr {learning_rate:g}, {num_steps} steps) for {sensor} "
                     f"in {time.perf_counter() - started:.0f} s")
         info = {"device": device, "train_s": round(time.perf_counter() - started, 3), "losses": losses,
                 "steps_run": steps_run[0],
                 "bf16": device == "cuda" and torch.cuda.get_device_capability()[0] >= 8,
-                "peak_gpu_mib": round(torch.cuda.max_memory_allocated() / 2**20) if device == "cuda" else None,
+                "peak_gpu_mib": peak, "forecast_device": "cpu",
                 "gpu": torch.cuda.get_device_name() if device == "cuda" else None}
         return chronos2_pipeline_forecaster(tuned, batch_size), info
 
