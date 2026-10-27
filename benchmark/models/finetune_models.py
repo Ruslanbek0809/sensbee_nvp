@@ -18,6 +18,10 @@
 #   torch when it starts. Each series is its own group, so pooled items never attend to each other.
 # - No validation set (no early stopping): the number of steps is a grid value. The checkpoint folder is deleted
 #   after the fit; the forecasts are the result, and a test run refits with its own cutoff.
+# - Memory: on the shared A100 (2026-10-27) a step of 256 series ran out of memory with 33 GB free (every fit failed).
+#   The trainer feeds micro-batches of MICRO_BATCH_SIZE series and accumulates their gradients, so each optimizer
+#   step still sees BATCH_SIZE series (the Chronos-2 dataset yields ready-made batches of fit's batch_size;
+#   TrainingArguments.max_steps counts optimizer steps).
 # Values only (no covariates). Context 28 days, the training context length too.
 
 import logging
@@ -33,7 +37,8 @@ from benchmark.tasks import BUCKETS_PER_DAY, HORIZON
 logger = logging.getLogger(__name__)
 
 CONTEXT_STEPS = 28 * BUCKETS_PER_DAY  # 2,688: the 28-day context, for training windows and forecasts
-BATCH_SIZE = 256                      # the library default
+BATCH_SIZE = 256                      # series per optimizer step: the library default
+MICRO_BATCH_SIZE = 64                 # series per forward and backward pass
 LORA_DEFAULT = {"r": 8, "lora_alpha": 16,
                 "target_modules": ["self_attention.q", "self_attention.v", "self_attention.k", "self_attention.o",
                                    "output_patch_embedding.output_layer"]}
@@ -52,9 +57,14 @@ def finetune_grid() -> dict[str, dict]:
 
 # Builds the trainer for one fine-tuning config and returns it with the parameters recorded in run.json.
 def chronos2_finetune_trainer(model_id: str, revision: str, mode: str, learning_rate: float, num_steps: int,
-                              batch_size: int = BATCH_SIZE):
+                              batch_size: int = BATCH_SIZE, micro_batch_size: int = MICRO_BATCH_SIZE):
+    micro_batch_size = min(micro_batch_size, batch_size)
+    if batch_size % micro_batch_size:
+        raise ValueError(f"BATCH SIZE {batch_size} IS NOT A MULTIPLE OF THE MICRO-BATCH SIZE {micro_batch_size}")
+    accumulation = batch_size // micro_batch_size
     params = {"model_id": model_id, "revision": revision, "finetune_mode": mode, "learning_rate": learning_rate,
-              "num_steps": num_steps, "batch_size": batch_size, "context_length": CONTEXT_STEPS,
+              "num_steps": num_steps, "batch_size": batch_size, "micro_batch_size": micro_batch_size,
+              "gradient_accumulation_steps": accumulation, "context_length": CONTEXT_STEPS,
               "prediction_length": HORIZON, "lr_scheduler": "linear", "warmup_steps": 0, "optim": "adamw_torch_fused",
               "min_past": HORIZON, "lora": LORA_DEFAULT if mode == "lora" else None, "validation": None,
               "cross_learning": False, "point_only": False}
@@ -67,13 +77,16 @@ def chronos2_finetune_trainer(model_id: str, revision: str, mode: str, learning_
             raise ValueError(f"NO TRAINING ITEMS FOR {sensor}")
         device = "cuda" if torch.cuda.is_available() else "cpu"
         base = Chronos2Pipeline.from_pretrained(model_id, revision=revision, device_map=device, dtype=torch.float32)
-        losses = []
+        losses, steps_run = [], []
 
-        # Keeps the training loss the Trainer logs every logging_steps.
+        # Keeps the training loss the Trainer logs every logging_steps, and the optimizer steps run.
         class LossLog(TrainerCallback):
             def on_log(self, args, state, control, logs=None, **kwargs):
                 if logs and "loss" in logs:
                     losses.append([state.global_step, float(logs["loss"])])
+
+            def on_train_end(self, args, state, control, **kwargs):
+                steps_run.append(state.global_step)
 
         if device == "cuda":
             torch.cuda.reset_peak_memory_stats()
@@ -82,7 +95,8 @@ def chronos2_finetune_trainer(model_id: str, revision: str, mode: str, learning_
         with tempfile.TemporaryDirectory(prefix="chronos2_ft_") as workdir:
             tuned = base.fit([item.to_numpy(dtype=np.float32) for item in items], prediction_length=HORIZON,
                              finetune_mode=mode, learning_rate=learning_rate, num_steps=num_steps,
-                             batch_size=batch_size, context_length=CONTEXT_STEPS, output_dir=workdir,
+                             batch_size=micro_batch_size, gradient_accumulation_steps=accumulation,
+                             context_length=CONTEXT_STEPS, output_dir=workdir,
                              callbacks=[LossLog()], remove_printer_callback=True, seed=seed, logging_steps=50,
                              disable_tqdm=True)
         tuned.model.__dict__.pop("forward", None)  # accelerate's bf16-autocast forward: back to the model's own
@@ -91,6 +105,7 @@ def chronos2_finetune_trainer(model_id: str, revision: str, mode: str, learning_
         logger.info(f"FINE-TUNED Chronos-2 ({mode}, lr {learning_rate:g}, {num_steps} steps) for {sensor} "
                     f"in {time.perf_counter() - started:.0f} s")
         info = {"device": device, "train_s": round(time.perf_counter() - started, 3), "losses": losses,
+                "steps_run": steps_run[0],
                 "bf16": device == "cuda" and torch.cuda.get_device_capability()[0] >= 8,
                 "peak_gpu_mib": round(torch.cuda.max_memory_allocated() / 2**20) if device == "cuda" else None,
                 "gpu": torch.cuda.get_device_name() if device == "cuda" else None}

@@ -7,6 +7,7 @@
 # - learning rate 0 gives exactly the zero-shot forecasts (gate Z: the wrapper changes nothing but the weights), also
 #   when training ran in bf16 as on an A100 (accelerate's bf16-autocast forward must not stay on the model; bf16 is
 #   forced here on the CPU, where accelerate wraps the forward the same way)
+# - micro-batches with gradient accumulation (batch 4 as 2 x 2) run the configured number of optimizer steps
 # - the 8 grid configs are named in the "chronos2_ft" family; the gate config is not
 # They need the Chronos-2 weights in the local Hugging Face cache and never download them. Run in the bench venv with
 #   HF_HUB_OFFLINE=1 venv-bench/bin/python -m pytest tests/benchmark/test_finetune.py -m integration -q
@@ -81,6 +82,15 @@ def test_learning_rate_zero_gives_the_zero_shot_forecasts(make_contexts, monkeyp
     tuned = _fine_tuned(make_contexts, "full", 0.0)[0](contexts, HORIZON, QUANTILE_LEVELS, 0)[0]
     zero_shot = ZERO_SHOT["chronos2"].build()[0](contexts, HORIZON, QUANTILE_LEVELS, 0)[0]
     np.testing.assert_array_equal(tuned, zero_shot)
+
+
+def test_micro_batches_accumulate_into_the_configured_optimizer_steps(make_contexts):
+    train, params = chronos2_finetune_trainer(MODEL_ID, REVISION, "full", 1e-4, num_steps=2, batch_size=4,
+                                              micro_batch_size=2)
+    (item,) = make_contexts(1, 30)
+    forecaster, info = train("S", [item], 0)
+    assert params["gradient_accumulation_steps"] == 2 and info["steps_run"] == 2
+    assert np.isfinite(forecaster(make_contexts(1, 28), HORIZON, QUANTILE_LEVELS, 0)[0]).all()
 
 
 def test_grid_configs_form_one_family_and_the_gate_config_is_outside_it():
