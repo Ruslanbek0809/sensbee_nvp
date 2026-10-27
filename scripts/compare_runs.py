@@ -6,9 +6,10 @@
 # - every per-cell metric mean (sensor, context, horizon) equal at 4 decimals: |difference| <= 5e-5 (comparing
 #   rounded values would fail on means that straddle a rounding boundary); NaN in both runs counts as equal, a cell
 #   missing from one run as different.
+# --contexts 28d compares only those contexts (e.g. a 28-day-only fine-tuned run with a 1/7/28-day zero-shot run).
 # Prints the largest differences and exits 1 if a check fails.
 #
-# Usage (from sensbee_nvp/): venv-bench/bin/python scripts/compare_runs.py <run A> <run B>
+# Usage (from sensbee_nvp/): venv-bench/bin/python scripts/compare_runs.py <run A> <run B> [--contexts 28d]
 
 import argparse
 import json
@@ -26,12 +27,21 @@ def main() -> None:
     parser.add_argument("run_a", type=Path)
     parser.add_argument("run_b", type=Path)
     parser.add_argument("--atol", type=float, default=0.01, help="absolute tolerance per quantile (target units)")
+    parser.add_argument("--contexts", nargs="+", help="compare only these contexts, e.g. 28d (default: all)")
     args = parser.parse_args()
     records = [json.loads((run / "run.json").read_text()) for run in (args.run_a, args.run_b)]
     for key in ("snapshot", "period", "settings"):
         if records[0][key] != records[1][key]:
             sys.exit(f"RUNS DIFFER IN {key.upper()}")
-    a, b = (pd.read_csv(run / "forecasts.csv.gz").set_index(KEYS).sort_index() for run in (args.run_a, args.run_b))
+
+    # The rows of the compared contexts (all without --contexts).
+    def keep(frame: pd.DataFrame) -> pd.DataFrame:
+        return frame if args.contexts is None else frame[frame["context"].isin(args.contexts)]
+
+    a, b = (keep(pd.read_csv(run / "forecasts.csv.gz")).set_index(KEYS).sort_index()
+            for run in (args.run_a, args.run_b))
+    if not len(a):
+        sys.exit("NO ROWS TO COMPARE")
     if not a.index.equals(b.index):
         sys.exit(f"RUNS COVER DIFFERENT ROWS: {len(a)} vs {len(b)}")
     if not np.allclose(a["y"], b["y"], equal_nan=True):
@@ -40,7 +50,7 @@ def main() -> None:
     qa, qb = a[quantiles].to_numpy(float), b[quantiles].to_numpy(float)
     largest = float(np.nanmax(np.abs(qa - qb)))
     columns = ["MAE", "RMSE", "MASE", "QL", "SQL", "COV80"]
-    means = [pd.read_csv(run / "metrics.csv").query("status != 'failed'").groupby(
+    means = [keep(pd.read_csv(run / "metrics.csv")).query("status != 'failed'").groupby(
         ["sensor", "context", "horizon_steps"])[columns].mean() for run in (args.run_a, args.run_b)]
     index = means[0].index.union(means[1].index)
     a_means, b_means = means[0].reindex(index), means[1].reindex(index)

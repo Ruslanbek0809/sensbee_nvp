@@ -49,11 +49,8 @@ def _covariate_input(context: pd.Series, window: pd.DataFrame, horizon: int) -> 
                                   for c in window.attrs["future_columns"]}}
 
 
-# Builds a Chronos-2 forecaster for one model id and revision, and returns it with the effective settings.
-def chronos2_forecaster(model_id: str, revision: str, device: str = "cpu", batch_size: int = 256):
-    import torch
-    from chronos.chronos2.pipeline import Chronos2Pipeline
-    pipeline = Chronos2Pipeline.from_pretrained(model_id, revision=revision, device_map=device, dtype=torch.float32)
+# The forecaster of a loaded Chronos-2 pipeline, zero-shot or fine-tuned (benchmark/models/finetune_models.py).
+def chronos2_pipeline_forecaster(pipeline, batch_size: int = 256):
     context_length = pipeline.model_context_length
 
     def forecast(contexts: list[pd.Series], horizon: int, levels: tuple[float, ...], seed: int,
@@ -66,6 +63,17 @@ def chronos2_forecaster(model_id: str, revision: str, device: str = "cpu", batch
                                                   batch_size=batch_size, context_length=context_length,
                                                   cross_learning=False, limit_prediction_length=True)
         return np.stack([q[0].numpy() for q in quantiles]), ["ok"] * len(contexts)
+
+    return forecast
+
+
+# Builds a Chronos-2 forecaster for one model id and revision, and returns it with the effective settings.
+def chronos2_forecaster(model_id: str, revision: str, device: str = "cpu", batch_size: int = 256):
+    import torch
+    from chronos.chronos2.pipeline import Chronos2Pipeline
+    pipeline = Chronos2Pipeline.from_pretrained(model_id, revision=revision, device_map=device, dtype=torch.float32)
+    context_length = pipeline.model_context_length
+    forecast = chronos2_pipeline_forecaster(pipeline, batch_size)
 
     return forecast, {"library": "chronos-forecasting", "model_id": model_id, "revision": revision, "device": device,
                       "dtype": "float32", "batch_size": batch_size, "context_length": context_length,

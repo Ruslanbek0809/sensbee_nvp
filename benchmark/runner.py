@@ -25,6 +25,9 @@
 # origin_stride=k keeps every k-th valid origin per sensor (a fixed subset for expensive models).
 # A forecaster may have a drain_diagnostics() method that returns plain counts (e.g. LLMTime's filtered samples) and
 # resets them. The runner calls it after each sensor and records the result in counts[sensor]["diagnostics"].
+# Pooled fits (Phase 6a, 6a.7): with pooled=True, the trainer is called once per sensor kind of the run (e.g. the 3
+# weather stations together) with the training items of all those sensors, each cut at the kind's earliest period
+# start ("Pooling" in the thesis evaluation rules). That one model then forecasts every sensor of the kind.
 # Covariates (Phase 4): with covariates=<set name> (benchmark/covariates.py), the forecaster is called with
 # covariates=[one DataFrame per context: its timestamps plus the HORIZON steps from the origin].
 # These frames are built only by covariates.covariate_window(), which hides the future of past-only columns.
@@ -200,6 +203,14 @@ def _fit(trainer: Trainer, sensor: str, series: pd.Series, task: SensorTask, cut
         items = [i for i in items if len(i) >= MIN_TRAIN_DAYS * BUCKETS_PER_DAY]
         extra = {"covariates_from": covariates.index[0].strftime(TIME_FORMAT),
                  "steps_before_covariates": int(before - sum(len(i) for i in items))}
+    return _train(trainer, sensor, items, cutoff, seed, covariates, extra)
+
+
+# Calls the trainer on the given items and returns the forecaster (None when the fit failed) and the fit record.
+def _train(trainer: Trainer, sensor: str, items: list[pd.Series], cutoff: pd.Timestamp, seed: int,
+           covariates: Optional[pd.DataFrame] = None,
+           extra: Optional[dict] = None) -> tuple[Optional[Forecaster], dict]:
+    extra = extra or {}
     record = {"cutoff": cutoff.strftime(TIME_FORMAT), "items": len(items), "steps": int(sum(len(i) for i in items)),
               "first": items[0].index[0].strftime(TIME_FORMAT) if items else None,
               "last": items[-1].index[-1].strftime(TIME_FORMAT) if items else None, **extra}
@@ -216,6 +227,18 @@ def _fit(trainer: Trainer, sensor: str, series: pd.Series, task: SensorTask, cut
     return forecaster, {**record, "fit_s": round(time.perf_counter() - started, 3), **info}
 
 
+# One pooled fit for the run's sensors of one kind: each sensor's training items before the kind's earliest period
+# start, so no sensor's period reaches the training data of another. The fit record also lists the sensors.
+def _fit_pooled(trainer: Trainer, kind: str, tasks: dict[str, SensorTask], frames: dict[str, pd.DataFrame],
+                period: str, seed: int) -> tuple[Optional[Forecaster], dict]:
+    group = {sensor: task for sensor, task in tasks.items() if task.kind == kind}
+    cutoff = min(period_bounds(task, period)[0] for task in group.values())
+    items = [item for sensor, task in group.items()
+             for item in training_items(target_series(frames[sensor], task), task, cutoff)]
+    forecaster, record = _train(trainer, f"{kind} (pooled)", items, cutoff, seed)
+    return forecaster, {**record, "pooled_sensors": sorted(group)}
+
+
 # Runs a forecaster (or, for a trained model, a trainer: see the header) over the given tasks (default: all TASKS)
 # for one period and context lengths (days; None = all history before the origin).
 # The results go to out_root/<run_id>. run_id defaults to "<UTC start time>_<model>".
@@ -223,17 +246,24 @@ def _fit(trainer: Trainer, sensor: str, series: pd.Series, task: SensorTask, cut
 # With the default contexts the origins are the same as before.
 # origin_stride=k evaluates every k-th valid origin.
 # covariates: a covariate set name (see the header). Every task must be of the set's kind.
+# pooled: one fit per sensor kind (see the header); needs a trainer, no covariates, and at least 2 sensors per kind.
 # Raises FileExistsError if that folder exists. Returns the run folder.
 def run(forecaster: Optional[Forecaster], model: str, snapshot_dir: Path, out_root: Path,
         tasks: Optional[dict[str, SensorTask]] = None, period: str = "test",
         context_days: tuple[Optional[int], ...] = CONTEXT_DAYS, seed: int = 0, run_id: Optional[str] = None,
         model_params: Optional[dict] = None, model_info: Optional[dict] = None, trainer: Optional[Trainer] = None,
-        origin_stride: int = 1, covariates: Optional[str] = None) -> Path:
+        origin_stride: int = 1, covariates: Optional[str] = None, pooled: bool = False) -> Path:
     if (forecaster is None) == (trainer is None):
         raise ValueError("GIVE EITHER A FORECASTER OR A TRAINER")
     if origin_stride < 1:
         raise ValueError(f"ORIGIN STRIDE {origin_stride} MUST BE AT LEAST 1")
     tasks = TASKS if tasks is None else tasks
+    if pooled:
+        kinds = [task.kind for task in tasks.values()]
+        alone = sorted({kind for kind in kinds if kinds.count(kind) < 2})
+        if trainer is None or covariates is not None or alone:
+            raise ValueError(f"A POOLED RUN NEEDS A TRAINER, NO COVARIATES AND 2+ SENSORS PER KIND (alone: {alone})")
+    pooled_fits: dict[str, tuple[Optional[Forecaster], dict]] = {}
     spec = None if covariates is None else cov.COVARIATE_SETS[covariates]
     if spec is not None:
         wrong = sorted(sensor for sensor, task in tasks.items() if task.kind != spec.kind)
@@ -270,7 +300,11 @@ def run(forecaster: Optional[Forecaster], model: str, snapshot_dir: Path, out_ro
             counts[sensor]["covariates"] = {"columns": kinds,
                                             "coverage": cov.coverage(frame, kinds, start - longest, end), **info}
         sensor_forecaster = forecaster
-        if trainer is not None and origins:
+        if trainer is not None and origins and pooled:
+            if task.kind not in pooled_fits:
+                pooled_fits[task.kind] = _fit_pooled(trainer, task.kind, tasks, frames, period, seed)
+            sensor_forecaster, counts[sensor]["fit"] = pooled_fits[task.kind]
+        elif trainer is not None and origins:
             sensor_forecaster, counts[sensor]["fit"] = _fit(
                 trainer, sensor, series, task, start, seed,
                 None if frame is None else cov.training_covariates(frame, kinds, start, series, task))
@@ -320,6 +354,7 @@ def run(forecaster: Optional[Forecaster], model: str, snapshot_dir: Path, out_ro
         "validity_context_days": list(validity_context_days(context_days)),
         "origin_stride": origin_stride,
         "trained": trainer is not None,
+        "pooled": pooled,
         "covariates": None if spec is None else {
             "set": covariates, "kind": spec.kind, "groups": list(spec.groups), "oracle": spec.oracle},
         "settings": {

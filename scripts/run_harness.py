@@ -13,6 +13,7 @@
 # - a trained model, fitted per sensor on the data before the period. Needs the bench venv.
 #   Tuned trained models (Phase 6a) are "<model>_tuned_<config>"; their calendar inputs come with --covariates
 #   (cal for the halls, sun for the weather stations, cal_parking for parking).
+#   Fine-tuned Chronos-2 (Phase 6a, 6a.7) is "chronos2_ft_tuned_<config>"; --pooled fits one model per sensor kind.
 # - LLMTime with a local LLM. Needs the bench venv and the weights.
 #
 # A model runs on its own allowed context lengths unless --contexts picks some of them.
@@ -56,7 +57,9 @@ sys.path.insert(0, str(PROJECT_ROOT))
 from benchmark.bands import widened_forecaster  # noqa: E402
 from benchmark.covariates import COVARIATE_SETS  # noqa: E402
 from benchmark.metrics import METRICS  # noqa: E402
-from benchmark.models import BASELINES, LLMTIME, MASKED, TRAINED, TUNED, ZERO_SHOT, library_versions  # noqa: E402
+from benchmark.models import (  # noqa: E402
+    BASELINES, FINETUNED, LLMTIME, MASKED, TRAINED, TUNED, ZERO_SHOT, library_versions,
+)
 from benchmark.runner import CHECK_FORECASTERS, run  # noqa: E402
 from benchmark.snapshot import load_snapshot  # noqa: E402
 from benchmark.tasks import CONTEXT_DAYS, TASKS, origin_table, target_series, validity_context_days  # noqa: E402
@@ -109,9 +112,9 @@ def main() -> None:
     parser = argparse.ArgumentParser(description="Benchmark harness on a frozen snapshot (no network)")
     parser.add_argument("--snapshot", type=Path, required=True, help="snapshot folder (with manifest.json)")
     parser.add_argument("--out", type=Path, help="parent folder; a new <run id> folder is created (not for --dry-run)")
-    parser.add_argument("--model", choices=[*CHECK_FORECASTERS, *BASELINES, *ZERO_SHOT, *TRAINED, *TUNED, *LLMTIME,
-                                            *MASKED],
-                        help="check forecaster, baseline, zero-shot, trained or LLMTime model")
+    parser.add_argument("--model", choices=[*CHECK_FORECASTERS, *BASELINES, *ZERO_SHOT, *TRAINED, *TUNED, *FINETUNED,
+                                            *LLMTIME, *MASKED],
+                        help="check forecaster, baseline, zero-shot, trained, fine-tuned or LLMTime model")
     parser.add_argument("--dry-run", action="store_true", help="list the origins per sensor and write nothing")
     parser.add_argument("--sensors", nargs="+", choices=list(TASKS), default=list(TASKS))
     parser.add_argument("--period", choices=["test", "validation"], default="test")
@@ -126,6 +129,8 @@ def main() -> None:
                         help="'0 when closed' models: forecast 0 where the opening profile is below this share")
     parser.add_argument("--band-factor", type=float,
                         help="widen every quantile around the median by this factor (>= 1; the service bands)")
+    parser.add_argument("--pooled", action="store_true",
+                        help="trained models: one fit per sensor kind on all its sensors' data (run name + '_pooled')")
     args = parser.parse_args()
     requested = None if args.contexts is None else tuple(None if c == "all" else int(c) for c in args.contexts)
 
@@ -135,7 +140,7 @@ def main() -> None:
     if args.out is None or args.model is None:
         parser.error("--out and --model are required unless --dry-run")
     model_info, forecaster, trainer = {}, None, None
-    models = {**BASELINES, **ZERO_SHOT, **TRAINED, **TUNED, **LLMTIME, **MASKED}
+    models = {**BASELINES, **ZERO_SHOT, **TRAINED, **TUNED, **FINETUNED, **LLMTIME, **MASKED}
     name = args.model
     if (args.model in MASKED) != (args.mask_threshold is not None):
         parser.error("--mask-threshold goes with a MASKED model, and every MASKED model needs it")
@@ -166,6 +171,10 @@ def main() -> None:
     else:
         forecaster, params = CHECK_FORECASTERS[args.model]
         contexts = requested or CONTEXT_DAYS
+    if args.pooled:
+        if trainer is None or args.covariates is not None:
+            parser.error("--pooled needs a trained model and no --covariates")
+        name = f"{name}_pooled"
     if args.band_factor is not None:
         if forecaster is None or args.band_factor < 1:
             parser.error("--band-factor needs a forecaster (not a trained model) and a factor >= 1")
@@ -176,7 +185,7 @@ def main() -> None:
     run_dir = run(forecaster, name, args.snapshot, args.out, tasks={sensor: TASKS[sensor] for sensor in args.sensors},
                   period=args.period, context_days=contexts, seed=args.seed, model_params=params,
                   model_info=model_info, trainer=trainer, origin_stride=args.origin_stride,
-                  covariates=args.covariates)
+                  covariates=args.covariates, pooled=args.pooled)
     with pd.option_context("display.width", 200, "display.max_rows", 500):
         print(summarize(run_dir).round(4).to_string())
     print(f"RUN WRITTEN to {run_dir}", file=sys.stderr)

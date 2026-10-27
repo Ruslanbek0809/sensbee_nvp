@@ -19,6 +19,7 @@ from typing import Callable, Optional
 
 from benchmark.models.autogluon_models import autogluon_forecaster
 from benchmark.models.chronos_models import chronos2_forecaster, chronos_bolt_forecaster
+from benchmark.models.finetune_models import chronos2_finetune_trainer, finetune_grid
 from benchmark.models.llmtime_models import llmtime_forecaster
 from benchmark.models.mask_models import mask_forecaster, recent_mask_forecaster
 from benchmark.models.moirai_models import moirai2_forecaster
@@ -48,7 +49,7 @@ MISTRAL_7B = ("mistralai/Mistral-7B-v0.1", "27d67f1b5f57dc0953326b2601d68371d40e
 LLAMA2_7B = ("meta-llama/Llama-2-7b-hf", "01c7f73d771dfac7d292323805ebc428287df4f9")
 PACKAGES = ("autogluon.timeseries", "statsforecast", "statsmodels", "scipy", "torch", "coreforecast", "joblib",
             "chronos-forecasting", "transformers", "huggingface_hub", "accelerate", "timesfm", "tirex-ts", "uni2ts",
-            "lightgbm", "mlforecast", "gluonts", "lightning")
+            "lightgbm", "mlforecast", "gluonts", "lightning", "peft")
 
 
 # One baseline.
@@ -145,6 +146,21 @@ def _tuned(base: str, model: str, params: dict) -> Baseline:
 
 
 TUNED: dict[str, Baseline] = {name: _tuned(*spec) for name, spec in tuned_grid().items()}
+
+
+# Fine-tuned Chronos-2 (Phase 6a, 6a.7, RQ4): one entry per config of finetune_models.finetune_grid(), on 28-day
+# contexts, values only; with --pooled, one fit per sensor kind. The pick per sensor is made on validation.
+# chronos2_ft_lr0 is gate Z only (learning rate 0: must forecast like zero-shot Chronos-2); without "_tuned_" in its
+# name it is never a candidate of the "chronos2_ft" family.
+def _finetuned(config: dict) -> Baseline:
+    return Baseline(lambda: chronos2_finetune_trainer(*CHRONOS2, **config), (28,), (*CHRONOS2, "model.safetensors"),
+                    trained=True)
+
+
+FINETUNED: dict[str, Baseline] = {
+    **{name: _finetuned(config) for name, config in finetune_grid().items()},
+    "chronos2_ft_lr0": _finetuned({"mode": "full", "learning_rate": 0.0, "num_steps": 10}),
+}
 
 
 # LLMTime (Phase 3, the research project's method) with Mistral-7B-v0.1, run locally.

@@ -5,6 +5,7 @@
 # - failed origins, fallbacks and crossed quantiles are counted instead of dropped or hidden
 # - the trainer hook of fitted models (once per sensor, only data before the period, a failed fit fails the sensor)
 # - the origin stride and a forecaster's diagnostics
+# - pooled fits: one fit per sensor kind, cut at the kind's earliest period start, and their refusals
 
 import json
 from pathlib import Path
@@ -321,3 +322,51 @@ def test_forecaster_diagnostics_are_drained_into_the_sensor_counts(tmp_path):
     assert record["counts"]["W"]["diagnostics"] == {"origins": 26} and seen["origins"] == 0
     assert "diagnostics" not in _record(run(naive_forecaster, "y", snapshot_dir, tmp_path / "runs", tasks=tasks,
                                             context_days=(1,)))["counts"]["W"]
+
+
+# Two weather-like sensors W1 (test from 2026-02-01) and W2 (test from 2026-02-03) with the PERIODIC values, plus a
+# visitor sensor V when with_v is set.
+def _pooled_snapshot(tmp_path: Path, with_v: bool = False) -> tuple[Path, dict[str, SensorTask]]:
+    snapshot_dir = tmp_path / "snapshot"
+    names = ["W1", "W2", "V"] if with_v else ["W1", "W2"]
+    sensors = {}
+    for name in names:
+        column = "visitors_total" if name == "V" else "temperature"
+        sha256 = write_raw_csv(pd.DataFrame({"created_at": TIMES, column: PERIODIC}),
+                               snapshot_dir / "raw" / f"{name}.csv.gz")
+        sensors[name] = {"file": f"raw/{name}.csv.gz", "sha256": sha256}
+    (snapshot_dir / MANIFEST_NAME).write_text(json.dumps({"snapshot_id": "test-snapshot", "sensors": sensors}))
+    tasks = {"W1": SensorTask("temperature", "AVG", "regular", "2026-02-01", "2026-02-05"),
+             "W2": SensorTask("temperature", "AVG", "regular", "2026-02-03", "2026-02-07")}
+    if with_v:
+        tasks["V"] = SensorTask("visitors_total", "MAX", "visitors", "2026-02-01", "2026-02-05")
+    return snapshot_dir, tasks
+
+
+def test_a_pooled_fit_is_one_fit_per_kind_on_every_sensor_before_the_earliest_period_start(tmp_path):
+    snapshot_dir, tasks = _pooled_snapshot(tmp_path)
+    calls = []
+    record = _record(run(None, "pooled", snapshot_dir, tmp_path / "runs", tasks=tasks, context_days=(1,),
+                         trainer=_recording_trainer(calls), pooled=True))
+
+    assert len(calls) == 1 and calls[0][0] == "regular (pooled)"
+    items = calls[0][1]
+    assert len(items) == 2  # one gap-free item per sensor, both cut at W1's earlier test start
+    assert all(item.index[-1] == pd.Timestamp("2026-01-31 23:45") for item in items)
+    fit = record["counts"]["W1"]["fit"]
+    assert fit == record["counts"]["W2"]["fit"] and fit["pooled_sensors"] == ["W1", "W2"]
+    assert fit["cutoff"].startswith("2026-02-01") and fit["items"] == 2
+    assert record["pooled"] is True
+
+
+def test_a_pooled_run_needs_a_trainer_no_covariates_and_two_sensors_per_kind(tmp_path):
+    snapshot_dir, tasks = _pooled_snapshot(tmp_path, with_v=True)
+    with pytest.raises(ValueError, match="POOLED RUN"):  # V is the only visitors sensor
+        run(None, "x", snapshot_dir, tmp_path / "a", tasks=tasks, context_days=(1,), trainer=_recording_trainer([]),
+            pooled=True)
+    two = {name: tasks[name] for name in ("W1", "W2")}
+    with pytest.raises(ValueError, match="POOLED RUN"):
+        run(naive_forecaster, "x", snapshot_dir, tmp_path / "b", tasks=two, context_days=(1,), pooled=True)
+    with pytest.raises(ValueError, match="POOLED RUN"):
+        run(None, "x", snapshot_dir, tmp_path / "c", tasks=two, context_days=(1,), trainer=_recording_trainer([]),
+            covariates="sun", pooled=True)
