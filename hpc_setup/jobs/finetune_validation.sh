@@ -39,12 +39,21 @@ fi
 export CUDA_DEVICE_ORDER=PCI_BUS_ID  # CUDA numbers the GPUs as nvidia-smi does
 export CUDA_VISIBLE_DEVICES=$GPU
 export HF_HUB_OFFLINE=1
+# The pinned weights are in the deployed folder's cache (download_models.py --pinned); a fresh ssh shell has no HF_HOME.
+export HF_HOME=${HF_HOME:-/scratch/ruha6285/sensbee_nvp/hf_cache}
 export TMPDIR=/scratch/ruha6285/tmp  # fine-tuning checkpoints (~478 MB each, deleted after the fit)
 mkdir -p "$TMPDIR"
 echo "$(date -u +%FT%TZ) GPU $GPU ($FREE MiB free), commit $(cat COMMIT)"
 # Without CUDA, the fine-tuning would quietly run on the CPU.
 venv-bench/bin/python -c "import sys, torch; print('torch', torch.__version__, 'cuda', torch.cuda.is_available()); sys.exit(not torch.cuda.is_available())" \
     || { echo "TORCH SEES NO GPU: stopping"; exit 1; }
+venv-bench/bin/python -c "
+import sys
+from huggingface_hub import try_to_load_from_cache
+from benchmark.models import CHRONOS2
+found = try_to_load_from_cache(CHRONOS2[0], 'model.safetensors', revision=CHRONOS2[1])
+print('WEIGHTS', found)
+sys.exit(not isinstance(found, str))" || { echo "CHRONOS-2 WEIGHTS NOT IN $HF_HOME: stopping"; exit 1; }
 
 # One harness run; prints a RUN line with the run time and the run folder, and stops the job when the run has a fit
 # error or a failed origin. The harness output goes to the job's log through a copy of its stderr descriptor (on Linux,
