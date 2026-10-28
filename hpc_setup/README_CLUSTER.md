@@ -180,3 +180,4 @@ The harness (`scripts/run_harness.py`) runs from the same deployed copy, with it
    ```
    `tail -f` the log to follow it. `GATE=1` runs only the first run, twice (timing projection and same-seed check), and stops; the same command without `GATE=1` runs the full grid.
    Fine-tuned Chronos-2 (6a.7): `hpc_setup/jobs/finetune_validation.sh /scratch/ruha6285/benchmark_data` (no family argument; needs 30 GB free on one GPU; its `GATE=1` also runs gate Z against the Mac zero-shot run `2026-10-14T222254Z_chronos2`, which must be in `/scratch/ruha6285/benchmark_data/mac_runs/`).
+   Test runs of the validation picks: `hpc_setup/jobs/tuned_test.sh /scratch/ruha6285/benchmark_data <selection.csv>` (the `selection.csv` of `scripts/select_on_validation.py`, copied to the cluster; seeds 0–4; `PLAN_ONLY=1` lists the planned runs and stops).
