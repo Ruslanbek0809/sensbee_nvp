@@ -31,7 +31,12 @@
 #   shipped mask uses, benchmark/models/mask_models.py). The same slots count for every model and context.
 #   It needs the snapshot (make_report(snapshot_dir=...)); without it the column is empty.
 # - Per-type tables (weather, halls, parking) come first in summary.md; the pooled tables follow.
+# - Trained models with several seeds (experiments.md: >= 5 seeds on test): the seeds' per-origin losses are averaged
+#   before every table and test; seeds.csv holds each seed's own cells (the spread).
+# - A pooled run (fitted on every sensor of its kind) keeps only the sensors that picked it on validation
+#   (picked_runs); its other sensors enter no table.
 
+import hashlib
 import json
 import logging
 import math
@@ -74,13 +79,21 @@ class FamilyTest:
 
 # Reads each run's run.json and metrics.csv.
 # Refuses runs that differ in snapshot, period or settings, and two runs of the same model.
-# aliases (run folder → model name) reports several runs as one model, e.g. a tuned model whose configs were picked
-# per sensor on validation (Phase 6a). Every merged run must be listed in aliases, cover disjoint sensors, and agree on
-# point_only, the oracle flag and the origin stride; the merged record lists every source run ("sources") and folder
-# ("dirs").
-# Returns (records by model, metrics of all runs with a "model" column).
-def load_runs(run_dirs: list[Path], aliases: Optional[dict[str, str]] = None) -> tuple[dict[str, dict], pd.DataFrame]:
+# aliases (run folder → model name) reports several runs as one model (Phase 6a). Every merged run must be listed in
+# aliases and agree on point_only, the oracle flag and the origin stride. Merged runs are either
+# - different configs on disjoint sensors, e.g. a tuned model whose configs were picked per sensor on validation, or
+# - seeds of one config (same run model name, distinct seeds) on the same sensors and origins. Their per-origin metrics
+#   are averaged over the seeds (average_seeds), so every table sees one loss per origin.
+# Every config of a merged model must have the same seeds (a forgotten seed folder is refused).
+# sensors (run folder → sensors) keeps only those sensors of a run, e.g. the sensors that picked a pooled run; the
+# others are dropped from its metrics, counts and forecasts. A kept sensor the run doesn't have is refused.
+# The merged record lists every source run ("sources"), folder ("dirs"), source run with its seed and kept counts
+# ("runs") and the model's seeds ("seeds").
+# Returns (records by model, metrics with a "model" column, averaged over seeds).
+def load_runs(run_dirs: list[Path], aliases: Optional[dict[str, str]] = None,
+              sensors: Optional[dict[str, list[str]]] = None) -> tuple[dict[str, dict], pd.DataFrame]:
     aliases = {str(Path(k)): v for k, v in (aliases or {}).items()}
+    sensors = {str(Path(k)): v for k, v in (sensors or {}).items()}
     records, frames, first = {}, [], None
     for run_dir in run_dirs:
         record = json.loads((Path(run_dir) / "run.json").read_text())
@@ -89,26 +102,101 @@ def load_runs(run_dirs: list[Path], aliases: Optional[dict[str, str]] = None) ->
             first = same
         elif same != first:
             raise ValueError(f"RUN {record['run_id']} DIFFERS IN SNAPSHOT, PERIOD OR SETTINGS from the first run")
+        keep = sensors.get(str(Path(run_dir)))
+        dropped = []
+        if keep is not None:
+            missing = sorted(set(keep) - set(record["counts"]))
+            if missing:
+                raise ValueError(f"RUN {record['run_id']} HAS NO SENSORS {missing}")
+            dropped = sorted(set(record["counts"]) - set(keep))
+            record["counts"] = {s: c for s, c in record["counts"].items() if s in keep}
         model = aliases.get(str(Path(run_dir)), record["model"])
-        record.update(dir=str(run_dir), dirs=[str(run_dir)], sources={record["run_id"]: record["model"]})
+        source = {"run_id": record["run_id"], "model": record["model"], "seed": record["seed"], "dir": str(run_dir),
+                  "counts": record["counts"], "kept": keep is not None, "dropped": dropped}
+        record.update(dir=str(run_dir), dirs=[str(run_dir)], sources={record["run_id"]: record["model"]},
+                      runs=[source])
         if model in records:
             merged = records[model]
             if not all(d in aliases for d in [*merged["dirs"], str(Path(run_dir))]):
                 raise ValueError(f"TWO RUNS OF MODEL {model}")
-            shared = sorted(set(merged["counts"]) & set(record["counts"]))
-            if shared:
-                raise ValueError(f"RUNS MERGED AS {model} SHARE SENSORS {shared}")
             flags = (_point_only(merged), _oracle(merged), merged.get("origin_stride", 1))
             if flags != (_point_only(record), _oracle(record), record.get("origin_stride", 1)):
                 raise ValueError(f"RUNS MERGED AS {model} DIFFER IN point_only, ORACLE OR origin_stride")
-            merged["counts"] = {**merged["counts"], **record["counts"]}
+            seeds = [r for r in merged["runs"] if r["model"] == record["model"]]
+            if seeds:
+                if record["seed"] in {r["seed"] for r in seeds}:
+                    raise ValueError(f"RUNS MERGED AS {model}: SEED {record['seed']} OF {record['model']} TWICE")
+                if set(seeds[0]["counts"]) != set(record["counts"]):
+                    raise ValueError(f"RUNS MERGED AS {model}: SEEDS OF {record['model']} KEEP DIFFERENT SENSORS")
+            else:
+                shared = sorted(set(merged["counts"]) & set(record["counts"]))
+                if shared:
+                    raise ValueError(f"RUNS MERGED AS {model} SHARE SENSORS {shared}")
+                merged["counts"] = {**merged["counts"], **record["counts"]}
             merged["dirs"].append(str(run_dir))
             merged["sources"][record["run_id"]] = record["model"]
+            merged["runs"].append(source)
         else:
             records[model] = {**record, "model": model}
-        metrics = pd.read_csv(Path(run_dir) / "metrics.csv", parse_dates=["origin"])
-        frames.append(metrics.assign(model=model))
-    return records, pd.concat(frames, ignore_index=True)
+        frames.append(_read_metrics(source).assign(model=model, seed=record["seed"], config=record["model"]))
+    for model, record in records.items():
+        by_config = {}
+        for source in record["runs"]:
+            by_config.setdefault(source["model"], set()).add(source["seed"])
+        if len({frozenset(seeds) for seeds in by_config.values()}) > 1:
+            raise ValueError(f"CONFIGS MERGED AS {model} HAVE DIFFERENT SEEDS "
+                             f"{ {config: sorted(seeds) for config, seeds in by_config.items()} }")
+        record["seeds"] = sorted(next(iter(by_config.values())))
+    return records, average_seeds(pd.concat(frames, ignore_index=True), records)
+
+
+# One source run's metric rows, only for the sensors it keeps (load_runs: source["counts"]).
+def _read_metrics(source: dict) -> pd.DataFrame:
+    metrics = pd.read_csv(Path(source["dir"]) / "metrics.csv", parse_dates=["origin"])
+    return metrics[metrics["sensor"].isin(source["counts"])]
+
+
+# Per-origin mean over the seeds of each model with more than one seed: one row per (sensor, context, origin,
+# horizon), every metric averaged. An origin that failed in any seed is "failed" with empty metrics (never imputed);
+# else "fallback" if any seed fell back. Models with one seed keep their rows unchanged. The seeds of one config must
+# have the same (sensor, context, origin, horizon) rows. Drops load_runs' "seed" and "config" columns.
+def average_seeds(metrics: pd.DataFrame, records: dict[str, dict]) -> pd.DataFrame:
+    keys = ["sensor", "context", "origin", "horizon_steps"]
+    out = []
+    for model, record in records.items():
+        rows = metrics[metrics["model"] == model]
+        if len(record["seeds"]) > 1:
+            per_key = rows.groupby(["config", *keys]).size()
+            if (per_key != len(record["seeds"])).any():
+                raise ValueError(f"SEEDS MERGED AS {model} DIFFER IN ORIGINS")
+            grouped = rows.groupby(keys, sort=False)
+            rank = rows["status"].map({"ok": 0, "fallback": 1, "failed": 2})
+            averaged = grouped[list(METRICS)].mean()
+            averaged["status"] = rank.groupby([rows[k] for k in keys], sort=False).max().map(
+                {0: "ok", 1: "fallback", 2: "failed"})
+            averaged.loc[averaged["status"] == "failed", list(METRICS)] = np.nan
+            averaged[["context_steps", "scale"]] = grouped[["context_steps", "scale"]].first()
+            rows = averaged.reset_index().assign(model=model)
+        out.append(rows[[c for c in metrics.columns if c not in ("seed", "config")]])
+    return pd.concat(out, ignore_index=True)
+
+
+# Aliases and kept sensors (load_runs) for runs reported as one model `name` from a validation picks file
+# (validation_selection output: sensor, model, family, selected). Each run keeps the sensors whose selected pick is
+# its config, e.g. a pooled run picked by only some sensors of its kind. Only the picks of the runs' model families
+# count. A run whose config isn't a pick, and a pick without a run, are refused.
+def picked_runs(picks_csv: Path, name: str, run_dirs: list[Path]) -> tuple[dict[str, str], dict[str, list[str]]]:
+    configs = {str(Path(d)): json.loads((Path(d) / "run.json").read_text())["model"] for d in run_dirs}
+    picks = pd.read_csv(picks_csv)
+    picks = picks[picks["selected"] & picks["family"].isin({model_family(m) for m in configs.values()})]
+    by_config = picks.groupby("model")["sensor"].apply(sorted).to_dict()
+    for run_dir, config in configs.items():
+        if config not in by_config:
+            raise ValueError(f"RUN {run_dir} ({config}) IS NOT A PICK IN {picks_csv}")
+    unrun = sorted(set(by_config) - set(configs.values()))
+    if unrun:
+        raise ValueError(f"PICKS WITHOUT A RUN: {unrun}")
+    return {d: name for d in configs}, {d: by_config[config] for d, config in configs.items()}
 
 
 # Keeps only the metric rows of the (sensor, origin) pairs that every model evaluated. Returns them and the pairs.
@@ -124,8 +212,8 @@ def _point_only(record: dict) -> bool:
     return bool(record.get("model_params", {}).get("point_only", False))
 
 
-# Mean metrics per model, sensor, context and horizon over the origins that didn't fail, plus the origin counts.
-# Probabilistic metrics are NaN for point-only models.
+# Mean metrics per model, sensor, context and horizon over the origins that didn't fail, plus the origin counts and
+# the number of seeds averaged per origin. Probabilistic metrics are NaN for point-only models.
 def cells(metrics: pd.DataFrame, records: dict[str, dict]) -> pd.DataFrame:
     ok = metrics[metrics["status"] != "failed"]
     out = ok.groupby(KEYS)[list(METRICS)].mean().reindex(metrics.groupby(KEYS).size().index)
@@ -135,7 +223,32 @@ def cells(metrics: pd.DataFrame, records: dict[str, dict]) -> pd.DataFrame:
     point_only = out["model"].map(lambda m: _point_only(records[m]))
     out.loc[point_only, list(PROBABILISTIC)] = np.nan
     out["point_only"] = point_only
+    out["n_seeds"] = out["model"].map(lambda m: len(records[m]["seeds"]))
     return out
+
+
+# The spread over seeds: for each model with more than one seed, every seed's own cell means of MASE, SQL and COV80
+# per sensor, context and horizon (origins that didn't fail; with common_origins only the kept pairs).
+# Probabilistic metrics are NaN for point-only models.
+def seed_cells(records: dict[str, dict], keep: Optional[pd.DataFrame] = None) -> pd.DataFrame:
+    columns = ["model", "seed", "sensor", "context", "horizon_steps", "MASE", "SQL", "COV80", "n_origins"]
+    frames = []
+    for model, record in records.items():
+        if len(record["seeds"]) < 2:
+            continue
+        for source in record["runs"]:
+            metrics = _read_metrics(source)
+            if keep is not None:
+                metrics = metrics.merge(keep, on=["sensor", "origin"])
+            ok = metrics[metrics["status"] != "failed"].groupby(["sensor", "context", "horizon_steps"])
+            table = ok[["MASE", "SQL", "COV80"]].mean().assign(n_origins=ok.size()).reset_index()
+            if _point_only(record):
+                table[["SQL", "COV80"]] = np.nan
+            frames.append(table.assign(model=model, seed=source["seed"]))
+    if not frames:
+        return pd.DataFrame(columns=columns)
+    return pd.concat(frames, ignore_index=True)[columns].sort_values(
+        ["model", "sensor", "context", "horizon_steps", "seed"], ignore_index=True)
 
 
 # Per-origin metric rows of one model, context and horizon, as relative_errors() expects them.
@@ -438,7 +551,10 @@ def validation_selection(run_dirs: list[Path], context: str = "28d") -> pd.DataF
 # Returns two tables:
 # - the share of negative 0.1 and 0.5 quantiles per model, sensor, context and horizon;
 # - the metrics of the visitor sensors with every quantile clipped at 0 (a sensitivity table only).
-# Reads each run's forecasts.csv.gz. keep: only these (sensor, origin) pairs (None = all).
+# Reads each source run's forecasts.csv.gz, only for the sensors it keeps. keep: only these (sensor, origin) pairs
+# (None = all).
+# A model with several seeds pools its seeds' forecast rows: the shares and COV80_open are means over seeds and
+# origins, and the clipped scores are computed per seed and origin, then averaged.
 # opened: open_slots() rows; with them, the negative table also gets COV80_open and n_open_steps for the halls
 # (empty for point-only models and without opened).
 def forecast_tables(records: dict[str, dict], metrics: pd.DataFrame, tasks: dict[str, SensorTask],
@@ -447,8 +563,11 @@ def forecast_tables(records: dict[str, dict], metrics: pd.DataFrame, tasks: dict
     visitors = {name for name, task in tasks.items() if task.kind == "visitors"}
     negative_rows, clipped_rows = [], []
     for model, record in records.items():
-        forecasts = pd.concat([pd.read_csv(Path(d) / "forecasts.csv.gz", parse_dates=["origin"])
-                               for d in record["dirs"]], ignore_index=True)
+        forecasts = []
+        for source in record["runs"]:
+            frame = pd.read_csv(Path(source["dir"]) / "forecasts.csv.gz", parse_dates=["origin"])
+            forecasts.append(frame[frame["sensor"].isin(source["counts"])].assign(run=source["run_id"]))
+        forecasts = pd.concat(forecasts, ignore_index=True)
         forecasts = forecasts[forecasts["status"] != "failed"]
         if keep is not None:
             forecasts = forecasts.merge(keep, on=["sensor", "origin"])
@@ -469,8 +588,8 @@ def forecast_tables(records: dict[str, dict], metrics: pd.DataFrame, tasks: dict
             negative_rows.append(shares.reset_index().assign(model=model, horizon_steps=h))
         scales = metrics[metrics["model"] == model].drop_duplicates(["sensor", "context", "origin"]).set_index(
             ["sensor", "context", "origin"])["scale"]
-        for (sensor, context, origin), window in forecasts[forecasts["sensor"].isin(visitors)].groupby(
-                ["sensor", "context", "origin"]):
+        for (_, sensor, context, origin), window in forecasts[forecasts["sensor"].isin(visitors)].groupby(
+                ["run", "sensor", "context", "origin"]):
             window = window.sort_values("step")
             quantiles = np.clip(window[QUANTILE_COLUMNS].to_numpy(dtype=float), 0, None)
             for row in window_metrics(window["y"].to_numpy(dtype=float), quantiles, QUANTILE_LEVELS,
@@ -486,17 +605,20 @@ def forecast_tables(records: dict[str, dict], metrics: pd.DataFrame, tasks: dict
     return negative, clipped
 
 
-# Origin counts per model, sensor and context from each run.json:
+# Origin counts per model, source run, sensor and context from each run.json (kept sensors only):
 # valid and evaluated origins, ok, fallback, failed, and crossed quantile steps.
 # With an origin stride fewer origins are evaluated. Runs from before the stride option evaluated every valid origin.
 def failures(records: dict[str, dict]) -> pd.DataFrame:
     rows = []
     for model, record in records.items():
-        for sensor, counts in record["counts"].items():
-            for context, c in counts["contexts"].items():
-                rows.append({"model": model, "sensor": sensor, "context": context, "valid_origins": counts["valid"],
-                             "evaluated_origins": counts.get("evaluated", counts["valid"]),
-                             **{k: c.get(k, 0) for k in ("ok", "fallback", "failed", "crossed_steps")}})
+        for source in record["runs"]:
+            for sensor, counts in source["counts"].items():
+                for context, c in counts["contexts"].items():
+                    rows.append({"model": model, "sensor": sensor, "context": context,
+                                 "valid_origins": counts["valid"],
+                                 "evaluated_origins": counts.get("evaluated", counts["valid"]),
+                                 **{k: c.get(k, 0) for k in ("ok", "fallback", "failed", "crossed_steps")},
+                                 "run_id": source["run_id"], "seed": source["seed"]})
     return pd.DataFrame(rows)
 
 
@@ -601,6 +723,15 @@ def summary_markdown(cell_table: pd.DataFrame, skill_table: pd.DataFrame, record
     if common is not None:
         parts.append(f"**Common origins only:** every table uses the {common} (sensor, origin) pairs that all runs "
                      "evaluated; sensors missing from any run are left out, so the skill may be n/a.\n")
+    seeded = sorted(f"{m} (seeds {', '.join(map(str, r['seeds']))})" for m, r in records.items()
+                    if len(r["seeds"]) > 1)
+    if seeded:
+        parts.append(f"**Seed-averaged:** {'; '.join(seeded)}. Per-origin losses are averaged over the seeds before "
+                     "every table and test; each seed's own cells are in seeds.csv.\n")
+    filtered = sorted(m for m, r in records.items() if any(s["dropped"] for s in r["runs"]))
+    if filtered:
+        parts.append(f"**Kept sensors only:** {', '.join(filtered)} report only the sensors that picked each run "
+                     "(report.json kept_sensors); the other sensors of those runs are in no table.\n")
     h = max(REPORT_STEPS)
     oracle = sorted(m for m, r in records.items() if _oracle(r))
     if tasks is not None:
@@ -628,18 +759,21 @@ def summary_markdown(cell_table: pd.DataFrame, skill_table: pd.DataFrame, record
 # common: only the (sensor, origin) pairs every run evaluated (see the header).
 # families: the family tests (default_families() plus any chosen on validation); none = no families.csv.
 # snapshot_dir: the runs' snapshot, for the open-slot coverage of the halls (refused if its id differs).
-# aliases: run folder → model name, to report several runs as one model (load_runs).
+# aliases: run folder → model name, to report several runs (configs or seeds) as one model; sensors: run folder →
+# the sensors it keeps (load_runs, picked_runs).
+# picks: model name → the validation picks file its aliases and sensors came from (recorded with its SHA-256).
 # Returns the folder.
 def make_report(run_dirs: list[Path], out_root: Path, reference: tuple[str, int],
                 tasks: Optional[dict[str, SensorTask]] = None, report_id: Optional[str] = None,
                 common: bool = False, families: Optional[list[FamilyTest]] = None,
-                snapshot_dir: Optional[Path] = None, aliases: Optional[dict[str, str]] = None) -> Path:
+                snapshot_dir: Optional[Path] = None, aliases: Optional[dict[str, str]] = None,
+                sensors: Optional[dict[str, list[str]]] = None, picks: Optional[dict[str, Path]] = None) -> Path:
     tasks = TASKS if tasks is None else tasks
     started = datetime.now(timezone.utc)
     report_dir = Path(out_root) / (report_id or f"{started:%Y-%m-%dT%H%M%SZ}_report")
     if report_dir.exists():
         raise FileExistsError(f"{report_dir} EXISTS; reports are never overwritten")
-    records, metrics = load_runs(run_dirs, aliases)
+    records, metrics = load_runs(run_dirs, aliases, sensors)
     keep = None
     if common:
         metrics, keep = common_origins(metrics)
@@ -665,6 +799,7 @@ def make_report(run_dirs: list[Path], out_root: Path, reference: tuple[str, int]
     dm_base_table.to_csv(report_dir / "dm_base.csv", index=False)
     clipped.to_csv(report_dir / "clipped_visitors.csv", index=False)
     failures(records).to_csv(report_dir / "failures.csv", index=False)
+    seed_cells(records, keep).to_csv(report_dir / "seeds.csv", index=False)
     if family_table is not None:
         family_table.to_csv(report_dir / "families.csv", index=False)
     n_common = None if keep is None else len(keep)
@@ -674,6 +809,10 @@ def make_report(run_dirs: list[Path], out_root: Path, reference: tuple[str, int]
     (report_dir / "report.json").write_text(json.dumps({
         "report_id": report_dir.name, "runs": {m: r["run_id"] for m, r in records.items()},
         "merged": {m: r["sources"] for m, r in records.items() if len(r["sources"]) > 1},
+        "seeds": {m: r["seeds"] for m, r in records.items() if len(r["seeds"]) > 1},
+        "kept_sensors": {s["run_id"]: sorted(s["counts"]) for r in records.values() for s in r["runs"] if s["kept"]},
+        "picks": {m: {"file": str(path), "sha256": hashlib.sha256(Path(path).read_bytes()).hexdigest()}
+                  for m, path in (picks or {}).items()},
         "snapshot": first["snapshot"], "period": first["period"], "reference": list(reference),
         "dm": {"horizon": DM_HORIZON, "harvey_adj": True}, "common_origins": n_common,
         "families": None if families is None else [vars(test) for test in families],

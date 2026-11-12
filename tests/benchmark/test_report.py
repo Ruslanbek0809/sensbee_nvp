@@ -11,6 +11,9 @@
 # - Phase 6a: Holm's correction on the hand example of the examiner review, the day bootstrap's grouping by Berlin
 #   day, the family tests end to end, and the halls' open-slot coverage on a hand example
 # - runs merged as one model (--as): the same tables as one run on both sensors; overlapping sensors refused
+# - seeds of one config merged as one model: per-origin losses equal the hand average over seeds; the per-seed cells;
+#   seed merges that don't add up are refused
+# - runs merged from a validation picks file (--picks): a pooled run's extra sensors enter no table
 # - selection on validation: one pick per sensor and model family (tuned configs and covariate sets share a family),
 #   never an oracle run, and only validation runs
 # The report always runs the DM tests, which need statsmodels. So these tests run in the bench venv only.
@@ -27,8 +30,9 @@ pytest.importorskip("statsmodels")
 
 from benchmark.bands import widened_forecaster  # noqa: E402
 from benchmark.models.mask_models import recent_mask_forecaster  # noqa: E402
-from benchmark.report import (FamilyTest, _berlin_days, day_bootstrap, dm_tests, holm,  # noqa: E402
-                              make_report, model_family, validation_selection)
+from benchmark.metrics import METRICS  # noqa: E402
+from benchmark.report import (FamilyTest, _berlin_days, cells, day_bootstrap, dm_tests, holm,  # noqa: E402
+                              load_runs, make_report, model_family, picked_runs, validation_selection)
 from benchmark.runner import naive_forecaster, run, seasonal_naive_forecaster  # noqa: E402
 from benchmark.snapshot import MANIFEST_NAME, write_raw_csv  # noqa: E402
 from benchmark.tasks import REPORT_STEPS, SensorTask  # noqa: E402
@@ -475,3 +479,167 @@ def test_runs_merged_as_one_model_equal_one_run_on_all_sensors(tmp_path):
     with pytest.raises(ValueError, match="ORACLE OR origin_stride"):
         make_report([ref, w, strided], tmp_path / "reports", ("snaive", 1), tasks=tasks, report_id="bad3",
                     aliases={str(w): "m", str(strided): "m"})
+
+
+# Naive forecasts shifted by c plus 0.1 × seed: each seed of one config scores differently.
+def _seeded(c: float):
+    def forecast(contexts, horizon, levels, seed):
+        quantiles, status = naive_forecaster(contexts, horizon, levels, seed)
+        return quantiles + c + 0.1 * seed, status
+    return forecast
+
+
+# Three seeds of one config merged as "m": every per-origin metric is the mean over the seeds' metrics.csv rows, the
+# cells and family test are built on those means, seeds.csv holds each seed's own cell means, and failures.csv lists
+# every seed's run.
+def test_seeds_of_one_config_are_averaged_per_origin(tmp_path):
+    snapshot_dir, tasks = _snapshot(tmp_path)
+    out = tmp_path / "runs"
+    ref = run(seasonal_naive_forecaster(96), "snaive", snapshot_dir, out, tasks=tasks, context_days=(1,), run_id="ref")
+    seeds = [run(_seeded(0.5), "m_tuned_a", snapshot_dir, out, tasks=tasks, context_days=(1,), seed=s, run_id=f"a{s}")
+             for s in (0, 1, 2)]
+    aliases = {str(d): "m" for d in seeds}
+    report = make_report([ref, *seeds], tmp_path / "reports", ("snaive", 1), tasks=tasks, report_id="r",
+                         aliases=aliases, families=[FamilyTest("F7", "m", "1d", "snaive", "1d")])
+
+    keys = ["sensor", "context", "origin", "horizon_steps"]
+    per_seed = pd.concat([pd.read_csv(d / "metrics.csv", parse_dates=["origin"]).assign(seed=s)
+                          for s, d in enumerate(seeds)])
+    hand = per_seed.groupby(keys)[list(METRICS)].mean()
+    _, metrics = load_runs([ref, *seeds], aliases)
+    own = metrics[metrics["model"] == "m"].set_index(keys)[list(METRICS)]
+    assert len(own) == len(pd.read_csv(seeds[0] / "metrics.csv"))  # one row per origin, not per seed
+    pd.testing.assert_frame_equal(own.sort_index(), hand.sort_index())
+    assert (own["MAE"] != per_seed[per_seed["seed"] == 0].set_index(keys)["MAE"]).all()  # the seeds do differ
+
+    cells = pd.read_csv(report / "cells.csv").set_index(["model", "sensor", "context", "horizon_steps"])
+    hand_cells = hand.groupby(["sensor", "context", "horizon_steps"]).mean()
+    for sensor in ("W", "V"):
+        for h in REPORT_STEPS:
+            cell = cells.loc[("m", sensor, "1d", h)]
+            assert cell["MAE"] == pytest.approx(hand_cells.loc[(sensor, "1d", h), "MAE"])
+            assert cell["n_origins"] == 13 and cell["n_seeds"] == 3
+    assert (cells.loc["snaive", "n_seeds"] == 1).all()
+
+    family = pd.read_csv(report / "families.csv").set_index("sensor").loc["W"]
+    ref_mae = pd.read_csv(ref / "metrics.csv").query("sensor == 'W' and horizon_steps == 96")["MAE"].mean()
+    assert family["n_origins"] == 13
+    assert family["mean_loss_difference"] == pytest.approx(hand.loc["W"].xs(96, level="horizon_steps")["MAE"].mean()
+                                                           - ref_mae)
+
+    table = pd.read_csv(report / "seeds.csv")
+    assert set(table["model"]) == {"m"} and sorted(table["seed"].unique()) == [0, 1, 2]
+    one = table.set_index(["seed", "sensor", "context", "horizon_steps"]).loc[(1, "W", "1d", 96)]
+    assert one["MASE"] == pytest.approx(per_seed.query("seed == 1 and sensor == 'W' and horizon_steps == 96")[
+        "MASE"].mean())
+    assert one["n_origins"] == 13
+    seed_mean = table[(table["sensor"] == "W") & (table["horizon_steps"] == 96)]["MASE"].mean()
+    assert seed_mean == pytest.approx(cells.loc[("m", "W", "1d", 96), "MASE"])
+
+    failures = pd.read_csv(report / "failures.csv")
+    assert sorted(failures.loc[(failures["model"] == "m") & (failures["sensor"] == "W"), "seed"]) == [0, 1, 2]
+    assert set(failures.loc[failures["model"] == "m", "run_id"]) == {"a0", "a1", "a2"}
+    assert json.loads((report / "report.json").read_text())["seeds"] == {"m": [0, 1, 2]}
+
+
+# Seed merges that don't add up are refused: one seed twice, seeds keeping different sensors or origins, configs with
+# different seed sets, and a kept sensor the run doesn't have.
+def test_seed_merges_that_dont_add_up_are_refused(tmp_path):
+    snapshot_dir, tasks = _snapshot(tmp_path)
+    out = tmp_path / "runs"
+
+    def seed_run(model, seed, run_id, sensors=("W", "V"), context_days=(1,)):
+        return run(_seeded(0.5), model, snapshot_dir, out, tasks={s: tasks[s] for s in sensors},
+                   context_days=context_days, seed=seed, run_id=run_id)
+
+    a0, a1 = seed_run("m_tuned_a", 0, "a0"), seed_run("m_tuned_a", 1, "a1")
+    as_m = lambda *dirs: {str(d): "m" for d in dirs}  # noqa: E731
+    with pytest.raises(ValueError, match="SEED 0 OF m_tuned_a TWICE"):
+        load_runs([a0, seed_run("m_tuned_a", 0, "a0_again")], as_m(a0, out / "a0_again"))
+    with pytest.raises(ValueError, match="KEEP DIFFERENT SENSORS"):
+        load_runs([a0, seed_run("m_tuned_a", 2, "a2_w", sensors=("W",))], as_m(a0, out / "a2_w"))
+    with pytest.raises(ValueError, match="DIFFER IN ORIGINS"):
+        load_runs([a0, seed_run("m_tuned_a", 3, "a3_long", context_days=(1, 2))], as_m(a0, out / "a3_long"))
+    b0 = seed_run("m_tuned_b", 0, "b0", sensors=("V",))
+    w0, w1 = seed_run("m_tuned_w", 0, "w0", sensors=("W",)), seed_run("m_tuned_w", 1, "w1", sensors=("W",))
+    with pytest.raises(ValueError, match="DIFFERENT SEEDS"):
+        load_runs([w0, w1, b0], as_m(w0, w1, b0))
+    with pytest.raises(ValueError, match="HAS NO SENSORS \\['X'\\]"):
+        load_runs([a0, a1], as_m(a0, a1), sensors={str(a0): ["W", "X"], str(a1): ["W"]})
+
+
+# Writes a picks file like scripts/select_on_validation.py: (sensor, model, family, selected) rows.
+def _picks(path: Path, rows: list[tuple[str, str, bool]]) -> Path:
+    pd.DataFrame([{"sensor": s, "model": m, "family": model_family(m), "selected": sel} for s, m, sel in rows]).to_csv(
+        path, index=False)
+    return path
+
+
+# A pooled config p ran on W and V but was picked only on W; config q was picked on V. Merged from the picks file,
+# every table equals the one built from runs of p that never saw V: p's V rows (forecasts below 0, so the negative
+# shares and clipped scores would show them) enter no table. Two seeds each.
+def test_a_pooled_runs_extra_sensors_enter_no_table(tmp_path):
+    snapshot_dir, tasks = _snapshot(tmp_path)
+    out = tmp_path / "runs"
+    ref = run(seasonal_naive_forecaster(96), "snaive", snapshot_dir, out, tasks=tasks, context_days=(1,), run_id="ref")
+
+    def seed_runs(model, c, sensors, tag):
+        return [run(_seeded(c), model, snapshot_dir, out, tasks={s: tasks[s] for s in sensors}, context_days=(1,),
+                    seed=s, run_id=f"{tag}{s}") for s in (0, 1)]
+
+    pooled = seed_runs("m_tuned_p_pooled", -5.0, ("W", "V"), "p")
+    q = seed_runs("m_tuned_q", 1.0, ("V",), "q")
+    w_only = seed_runs("m_tuned_p_pooled", -5.0, ("W",), "pw")
+    picks = _picks(tmp_path / "picks.csv", [("W", "m_tuned_p_pooled", True), ("V", "m_tuned_q", True),
+                                            ("V", "m_tuned_p_pooled", False), ("W", "other_tuned_x", True)])
+    aliases, sensors = picked_runs(picks, "m", [*pooled, *q])
+    assert sensors == {str(pooled[0]): ["W"], str(pooled[1]): ["W"], str(q[0]): ["V"], str(q[1]): ["V"]}
+    families = [FamilyTest("F7", "m", "1d", "snaive", "1d")]
+    picked = make_report([ref, *pooled, *q], tmp_path / "reports", ("snaive", 1), tasks=tasks, report_id="picked",
+                         aliases=aliases, sensors=sensors, families=families, snapshot_dir=snapshot_dir,
+                         picks={"m": picks})
+    clean = make_report([ref, *w_only, *q], tmp_path / "reports", ("snaive", 1), tasks=tasks, report_id="clean",
+                        aliases={str(d): "m" for d in [*w_only, *q]}, families=families, snapshot_dir=snapshot_dir)
+
+    for name in ("cells.csv", "relative.csv", "skill.csv", "dm.csv", "families.csv", "clipped_visitors.csv",
+                 "seeds.csv"):
+        pd.testing.assert_frame_equal(pd.read_csv(picked / name), pd.read_csv(clean / name), obj=name)
+    pd.testing.assert_frame_equal(pd.read_csv(picked / "failures.csv").drop(columns="run_id"),
+                                  pd.read_csv(clean / "failures.csv").drop(columns="run_id"))
+    cells = pd.read_csv(picked / "cells.csv").set_index(["model", "sensor", "context", "horizon_steps"])
+    assert cells.loc[("m", "V", "1d", 24), "negative_q0.1"] == 0.0  # p's V forecasts are all below 0
+    record = json.loads((picked / "report.json").read_text())
+    assert record["picks"]["m"]["file"] == str(picks) and len(record["picks"]["m"]["sha256"]) == 64
+    assert record["kept_sensors"] == {"p0": ["W"], "p1": ["W"], "q0": ["V"], "q1": ["V"]}
+
+
+# A run that isn't a pick, and a pick of the runs' families without a run, are refused.
+def test_picked_runs_refuses_unpicked_runs_and_picks_without_runs(tmp_path):
+    snapshot_dir, tasks = _snapshot(tmp_path)
+    out = tmp_path / "runs"
+    a = run(naive_forecaster, "m_tuned_a", snapshot_dir, out, tasks=tasks, context_days=(1,), run_id="a")
+    b = run(naive_forecaster, "m_tuned_b", snapshot_dir, out, tasks=tasks, context_days=(1,), run_id="b")
+    picks = _picks(tmp_path / "picks.csv", [("W", "m_tuned_a", True), ("V", "m_tuned_b", False)])
+    with pytest.raises(ValueError, match="IS NOT A PICK"):
+        picked_runs(picks, "m", [a, b])
+    picks = _picks(tmp_path / "picks2.csv", [("W", "m_tuned_a", True), ("V", "m_tuned_b", True)])
+    with pytest.raises(ValueError, match="PICKS WITHOUT A RUN: \\['m_tuned_b'\\]"):
+        picked_runs(picks, "m", [a])
+
+
+# An origin that failed in one seed is failed in the seed average: empty metrics, counted in n_failed, never imputed
+# from the other seeds.
+def test_an_origin_failed_in_one_seed_is_failed_in_the_average(tmp_path):
+    snapshot_dir, tasks = _snapshot(tmp_path)
+    out = tmp_path / "runs"
+
+    def fails_in_seed_1(contexts, horizon, levels, seed):
+        return (_failing_forecaster if seed == 1 else naive_forecaster)(contexts, horizon, levels, seed)
+
+    seeds = [run(fails_in_seed_1, "m_tuned_a", snapshot_dir, out, tasks=tasks, context_days=(1,), seed=s,
+                 run_id=f"a{s}") for s in (0, 1)]
+    records, metrics = load_runs(seeds, {str(d): "m" for d in seeds})
+    first = metrics[(metrics["sensor"] == "W") & (metrics["origin"] == metrics["origin"].min())]
+    assert (first["status"] == "failed").all() and first[list(METRICS)].isna().all().all()
+    cell = cells(metrics, records).set_index(["sensor", "horizon_steps"]).loc[("W", 96)]
+    assert cell["n_failed"] == 1 and cell["n_origins"] == 12
