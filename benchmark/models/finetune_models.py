@@ -19,7 +19,7 @@
 #   comparator as they are.
 # - Library defaults kept and recorded: linear learning-rate decay, no warmup, AdamW (fused), min_past = the horizon,
 #   LoRA r 8 / alpha 16 on the attention q/k/v/o and the output layer. On a GPU with compute capability >= 8 (A100),
-#   fit() trains in bf16 with tf32 and restores tf32 when it returns; forecasts are float32.
+#   fit() trains in bf16 with tf32; the trainer then restores the float32 settings (TF32 above); forecasts are float32.
 # - Training windows: a series is drawn uniformly per item (not per step), a window end uniformly within it, with
 #   the global numpy RNG. The seed goes to the Hugging Face Trainer (TrainingArguments.seed), which seeds numpy and
 #   torch when it starts. Each series is its own group, so pooled items never attend to each other.
