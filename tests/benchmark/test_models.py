@@ -4,6 +4,7 @@
 # - Theta as a point forecaster
 # - ETS without the season and without AutoGluon's silent fallback
 # - exact seasonal naive on a periodic series
+# - the seasonal average over the week (ag_savg672) as the mean of the 4 same weekday-slots, by hand
 # Run only where AutoGluon and statsforecast are installed (the bench venv).
 
 import numpy as np
@@ -54,3 +55,18 @@ def test_seasonal_naive_96_repeats_the_last_day_of_a_periodic_series(make_contex
     context = make_contexts(1, 8, noise=0.0)[0]
     quantiles, _ = forecaster([context], HORIZON, QUANTILE_LEVELS, 0)
     np.testing.assert_allclose(quantiles[0, :, QUANTILE_LEVELS.index(0.5)], context.to_numpy()[-96:], atol=1e-9)
+
+
+# Seasonal average (protocol P3, audit F-04) by hand: on a 28-day context (4 weeks of 672 steps), forecast step k is
+# the mean of the 4 values at the same weekday-slot 1, 2, 3 and 4 weeks before it, i.e. positions k, 672 + k,
+# 1344 + k and 2016 + k of the context. Point-only: every quantile is that mean (not the median of the 4 values).
+def test_seasonal_average_672_is_the_mean_of_the_last_four_same_weekday_slots(make_contexts):
+    forecaster, params = BASELINES["ag_savg672"].build()
+    context = make_contexts(1, 28, noise=1.0)[0]
+    quantiles, _ = forecaster([context], HORIZON, QUANTILE_LEVELS, 0)
+    weeks = context.to_numpy().reshape(4, 672)[:, :HORIZON]
+    assert params["point_only"] is True and params["hyperparameters"]["seasonal_period"] == 672
+    assert BASELINES["ag_savg672"].contexts == (28,)
+    np.testing.assert_allclose(quantiles[0], np.repeat(weeks.mean(axis=0)[:, None], len(QUANTILE_LEVELS), 1),
+                               rtol=1e-12, atol=1e-12)
+    assert np.abs(np.median(weeks, axis=0) - weeks.mean(axis=0)).max() > 0.1  # the mean, not the median, is checked

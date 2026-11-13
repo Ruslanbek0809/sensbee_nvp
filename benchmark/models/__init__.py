@@ -87,6 +87,11 @@ BASELINES: dict[str, Baseline] = {
     "sf_mstl_d": Baseline(lambda: mstl_forecaster([SEASON]), (7, 14, 28)),
     "sf_mstl_dw": Baseline(lambda: mstl_forecaster([SEASON, WEEK]), (14, 28)),
     "sf_mstl_arima": Baseline(lambda: mstl_forecaster([SEASON], trend="arima"), (7, 14, 28)),
+    # Seasonal average over the week (protocol P3, audit F-04): AutoGluon SeasonalAverage groups the context by
+    # position mod 672, so on 28 days each step is the mean of its 4 same weekday-slots. Point-only (owner
+    # 2026-11-13): its quantiles are empirical quantiles of 4 values, and its median isn't that mean.
+    "ag_savg672": Baseline(lambda: autogluon_forecaster("SeasonalAverage", {"seasonal_period": WEEK},
+                                                        point_only=True), (28,)),
 }
 
 # Zero-shot foundation models. Chronos-2 reads up to 8,192 steps, so 85 days (8,160 steps) is its longest context.

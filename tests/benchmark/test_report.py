@@ -10,6 +10,9 @@
 #   oracle section
 # - Phase 6a: Holm's correction on the hand example of the examiner review, the day bootstrap's grouping by Berlin
 #   day, the family tests end to end, and the halls' open-slot coverage on a hand example
+# - statistics v2 (protocol P2): the 28-lag DM column against statsmodels, Holm on it within each family and the
+#   bandwidth wording; the 7-day circular block bootstrap on a hand example and on weekly-correlated days; F3 tests
+#   Chronos-2 against both statistical baselines (P3)
 # - runs merged as one model (--as): the same tables as one run on both sensors; overlapping sensors refused
 # - seeds of one config merged as one model: per-origin losses equal the hand average over seeds; the per-seed cells;
 #   seed merges that don't add up are refused
@@ -31,8 +34,9 @@ pytest.importorskip("statsmodels")
 from benchmark.bands import widened_forecaster  # noqa: E402
 from benchmark.models.mask_models import recent_mask_forecaster  # noqa: E402
 from benchmark.metrics import METRICS  # noqa: E402
-from benchmark.report import (FamilyTest, _berlin_days, cells, day_bootstrap, dm_tests, holm,  # noqa: E402
-                              load_runs, make_report, model_family, picked_runs, validation_selection)
+from benchmark.report import (DM_LONG_LAGS, FamilyTest, _berlin_days, bandwidth_wording,  # noqa: E402
+                              block_bootstrap, cells, day_bootstrap, default_families, dm_tests, holm, load_runs,
+                              make_report, model_family, picked_runs, validation_selection)
 from benchmark.runner import naive_forecaster, run, seasonal_naive_forecaster  # noqa: E402
 from benchmark.snapshot import MANIFEST_NAME, write_raw_csv  # noqa: E402
 from benchmark.tasks import REPORT_STEPS, SensorTask  # noqa: E402
@@ -168,6 +172,25 @@ def test_dm_statistic_is_negative_for_a_model_with_lower_losses():
     table = dm_tests(pd.DataFrame(rows), records, ("ref", 1)).query("model == 'good'")
     assert len(table) == 2 * len(REPORT_STEPS)
     assert (table["statistic"] < 0).all() and (table["pvalue"] < 0.05).all()
+
+
+# The second DM column (protocol P2): the same test with 28 lags (7 days of 6-hourly origins), equal to a direct
+# statsmodels call, in dm.csv as in families.csv.
+def test_dm_tests_add_a_28_lag_column_equal_to_statsmodels():
+    from statsmodels.tsa.api import diebold_mariano_test
+    rng = np.random.default_rng(1)
+    origins = pd.date_range("2026-02-01", periods=60, freq="6h")
+    losses = {"ref": 1.0 + rng.normal(0, 0.2, len(origins)), "good": 0.9 + rng.normal(0, 0.2, len(origins))}
+    rows = [{"model": m, "sensor": "S", "context": "1d", "horizon_steps": h, "origin": o, "MAE": v, "QL": v}
+            for m, values in losses.items() for h in REPORT_STEPS for o, v in zip(origins, values)]
+    records = {"ref": {"model_params": {}}, "good": {"model_params": {}}}
+    row = dm_tests(pd.DataFrame(rows), records, ("ref", 1)).query("model == 'good' and loss == 'MAE'").iloc[0]
+    direct = diebold_mariano_test(np.zeros(len(origins)), losses["good"], losses["ref"], criterion=lambda y, f: f,
+                                  horizon=4, harvey_adj=True, lags=28)
+    assert DM_LONG_LAGS == 28 and row["lags_28"] == 28 and row["lags"] == 4  # primary: max(3, ceil(60^(1/3)))
+    assert row["pvalue_28"] == pytest.approx(direct.pvalue, rel=1e-12)
+    assert row["statistic_28"] == pytest.approx(direct.statistic, rel=1e-12)
+    assert row["pvalue_28"] != pytest.approx(row["pvalue"], rel=1e-6)
 
 
 
@@ -340,6 +363,50 @@ def test_bootstrap_resamples_whole_berlin_days():
     assert day_bootstrap(values) == (2.0, 2.0, 2.0)
 
 
+# By hand: three Berlin calendar days, the middle one without origins (kept as an empty day). A 7-day block spans the
+# whole 3-day period, so every circular resample draws each day exactly once: the interval is the mean, (1+3+8)/3.
+# The single-day bootstrap spreads the same values.
+def test_block_bootstrap_draws_each_day_once_when_a_block_spans_the_period():
+    values = pd.Series([1.0, 3.0, 8.0], index=pd.DatetimeIndex(["2026-02-01 06:00", "2026-02-01 12:00",
+                                                                "2026-02-03 06:00"]))
+    assert block_bootstrap(values, block_days=7) == (4.0, 4.0, 4.0)
+    assert day_bootstrap(values)[2] > 4.0
+
+
+# Loss differences that stay correlated within each week (+1 one week, -1 the next, for 8 weeks): resampling single
+# days treats them as independent and gives a narrow interval; 7-day blocks keep the weeks and give a wider one.
+# Expected width ratio: a block starting s days into a week averages 1 - 2s/7, whose mean square over s = 0..6 is
+# 0.347, so the ratio is about sqrt(7 * 0.347) = 1.56; with 1-day blocks it would be about 1.
+def test_block_bootstrap_widens_the_interval_for_weekly_correlated_days():
+    origins = pd.date_range("2026-01-05", periods=56 * 4, freq="6h")  # Mondays at 00:00 UTC start each week
+    week = np.asarray((origins - origins[0]).days // 7)
+    noise = np.random.default_rng(0).normal(0, 0.1, len(origins))
+    values = pd.Series(np.where(week % 2 == 0, 1.0, -1.0) + noise, index=origins)
+    _, day_low, day_high = day_bootstrap(values)
+    mean, low, high = block_bootstrap(values)
+    assert mean == pytest.approx(values.mean()) and low <= mean <= high
+    assert (high - low) > 1.3 * (day_high - day_low)
+
+
+# The wording rule of protocol P2: robust only when significant after Holm under both lag settings.
+def test_bandwidth_wording():
+    assert bandwidth_wording(True, True) == "robust"
+    assert bandwidth_wording(True, False) == "depends on the bandwidth"
+    assert bandwidth_wording(False, True) == "depends on the bandwidth"
+    assert bandwidth_wording(False, False) == "not significant"
+
+
+# F3 tests Chronos-2 against both statistical baselines when they are in the report (P3 adds ag_savg672).
+def test_f3_tests_chronos2_against_both_statistical_baselines():
+    zero_shot = {"chronos2": (28,)}
+    tests = default_families({"chronos2", "sf_mstl_arima", "ag_savg672", "ag_snaive96"}, ("ag_snaive96", 28),
+                             zero_shot, {})
+    f3 = [(t.model, t.against, t.context, t.against_context) for t in tests if t.family == "F3"]
+    assert f3 == [("chronos2", "sf_mstl_arima", "28d", "28d"), ("chronos2", "ag_savg672", "28d", "28d")]
+    without = default_families({"chronos2", "sf_mstl_arima", "ag_snaive96"}, ("ag_snaive96", 28), zero_shot, {})
+    assert [t.against for t in without if t.family == "F3"] == ["sf_mstl_arima"]
+
+
 # A family test end to end: naive against seasonal naive on both sensors, Holm within the family, the bootstrap
 # interval around the MASE difference, and families.csv plus its summary section.
 def test_family_tests_with_holm_and_bootstrap_interval(tmp_path):
@@ -382,6 +449,39 @@ def test_holm_is_applied_within_each_family(tmp_path):
     f2 = families[families["family"] == "F2"].iloc[0]
     assert f2["pvalue_holm"] == pytest.approx(f2["pvalue"], rel=1e-9, abs=0)  # alone in its family (p ~ 1e-14)
     assert (f1["pvalue_holm"] >= f1["pvalue"]).all() and f1["pvalue_holm"].max() > f1["pvalue"].min()
+
+
+# Statistics v2 end to end: the 28-lag p-values get their own Holm correction within each family, the bandwidth
+# wording follows both decisions, the 7-day block interval sits next to the single-day one, and summary.md and
+# report.json say so.
+def test_family_tests_add_the_28_lag_holm_wording_and_block_interval(tmp_path):
+    snapshot_dir, tasks = _snapshot(tmp_path)
+    out, weather = tmp_path / "runs", {"W": tasks["W"]}
+    runs = [run(seasonal_naive_forecaster(96), "snaive", snapshot_dir, out, tasks=weather, context_days=(1,),
+                run_id="snaive"),
+            run(naive_forecaster, "naive", snapshot_dir, out, tasks=weather, context_days=(1,), run_id="naive"),
+            run(_negative_forecaster, "negative", snapshot_dir, out, tasks=weather, context_days=(1,),
+                run_id="negative")]
+    report = make_report(runs, tmp_path / "reports", ("snaive", 1), tasks=weather, report_id="r",
+                         families=[FamilyTest("F1", "naive", "1d", "snaive", "1d"),
+                                   FamilyTest("F1", "negative", "1d", "snaive", "1d")])
+    families = pd.read_csv(report / "families.csv")
+    adjusted, significant = holm(families["pvalue_28"])
+    assert families["pvalue_holm_28"].tolist() == pytest.approx(adjusted.tolist(), rel=1e-12, abs=0)  # p ~ 1e-20
+    assert families["significant_holm_28"].tolist() == significant.tolist()
+    assert (families["lags_28"] == 28).all()
+    assert families["bandwidth"].tolist() == [bandwidth_wording(a, b) for a, b in zip(
+        families["significant_holm"], families["significant_holm_28"])]
+    for _, row in families.iterrows():
+        mean, low, high = row[["MASE_difference", "MASE_difference_low_block7", "MASE_difference_high_block7"]]
+        assert low <= mean <= high
+        assert row["interval_excludes_0_block7"] == bool(low > 0 or high < 0)
+    summary = (report / "summary.md").read_text()
+    assert "pvalue_holm_28" in summary and "bandwidth" in summary and "MASE_difference_low_block7" in summary
+    record = json.loads((report / "report.json").read_text())
+    assert record["dm"]["long_lags"] == 28
+    assert record["block_bootstrap"] == {"samples": 2000, "seed": 0, "block_days": 7,
+                                         "unit": "Berlin calendar day, circular"}
 
 
 # Halls' open-slot coverage by hand: visitors are 5 in UTC slots 0-47 and 0 in slots 48-95 every day, so the

@@ -26,6 +26,11 @@
 #   on per-origin MAE at 24 h (QL as a second column), per sensor, with Holm's correction within the family.
 #   Next to it: the effect size, the mean MASE difference at 24 h, with a 95 % interval from a bootstrap over whole
 #   Berlin days (the 6-hourly origins overlap, so days, not origins, are resampled).
+# - Statistics v2 (protocol P2, audit F-03): loss differences stay correlated from day to day, so every DM test in
+#   dm.csv and dm_base.csv, and the MAE test in families.csv, has a second column with 28 lags (7 days of origins)
+#   next to the primary lag rule. A family test is "robust" only if it is significant after Holm under both
+#   ("bandwidth" column). The effect-size interval comes from a circular block bootstrap over 7 consecutive Berlin
+#   calendar days ("_block7" columns); the single-day interval stays as the second one.
 # - COV80_open: for the halls, the coverage of the 80 % interval on open slots only. A slot is open when the hall's
 #   opening profile over the 28 days before the origin is >= 0.3 there (owner decision 2026-10-26; the rule the
 #   shipped mask uses, benchmark/models/mask_models.py). The same slots count for every model and context.
@@ -57,6 +62,8 @@ logger = logging.getLogger(__name__)
 REFERENCE_LABEL = "reference"
 PROBABILISTIC = ("QL", "SQL", "COV80")
 DM_HORIZON = 4  # 24-h windows every 6 h overlap 4 origins: HAC lags ≥ 3
+DM_LONG_LAGS = 28  # the second DM column: 7 days of 6-hourly origins (protocol P2)
+BLOCK_DAYS = 7     # block length of the effect-size bootstrap, in calendar days (protocol P2)
 QUANTILE_COLUMNS = [f"q{level:g}" for level in QUANTILE_LEVELS]
 KEYS = ["model", "sensor", "context", "horizon_steps"]
 OPEN_THRESHOLD = 0.3     # a hall slot is open when its 28-day context profile is >= this (owner decision 2026-10-26)
@@ -320,19 +327,24 @@ def skill(relative_table: pd.DataFrame, tasks: dict[str, SensorTask]) -> pd.Data
 
 # One Diebold–Mariano row for a model's per-origin losses `a` against `b` (both indexed by origin), with `row` as its
 # labels. The values are empty, with a note, when the origins don't pair, an origin failed, or the losses are identical.
+# The primary test uses statsmodels' lag rule max(DM_HORIZON - 1, ceil(n^(1/3))); "_28" is the same test with
+# DM_LONG_LAGS lags (protocol P2).
 def _dm_row(a: pd.Series, b: pd.Series, row: dict) -> dict:
     from statsmodels.tsa.api import diebold_mariano_test
+    empty = {"statistic_28": np.nan, "pvalue_28": np.nan, "lags_28": np.nan}
     if set(a.index) != set(b.index) or a.isna().any() or b.isna().any():
         return {**row, "statistic": np.nan, "pvalue": np.nan, "lags": np.nan, "mean_loss_difference": np.nan,
-                "note": "unpaired or failed origins"}
+                "note": "unpaired or failed origins", **empty}
     b = b.loc[a.index]
     if np.allclose(a.to_numpy(), b.to_numpy()):  # e.g. the same point forecast as the reference
         return {**row, "statistic": np.nan, "pvalue": np.nan, "lags": np.nan,
-                "mean_loss_difference": float((a - b).mean()), "note": "identical losses"}
-    result = diebold_mariano_test(np.zeros(len(a)), a.to_numpy(), b.to_numpy(), criterion=lambda y, f: f,
-                                  horizon=DM_HORIZON, harvey_adj=True)
-    return {**row, "statistic": float(result.statistic), "pvalue": float(result.pvalue), "lags": int(result.lags),
-            "mean_loss_difference": float((a - b).mean()), "note": ""}
+                "mean_loss_difference": float((a - b).mean()), "note": "identical losses", **empty}
+    results = [diebold_mariano_test(np.zeros(len(a)), a.to_numpy(), b.to_numpy(), criterion=lambda y, f: f,
+                                    horizon=DM_HORIZON, harvey_adj=True, lags=lags) for lags in (None, DM_LONG_LAGS)]
+    primary, long = results
+    return {**row, "statistic": float(primary.statistic), "pvalue": float(primary.pvalue), "lags": int(primary.lags),
+            "mean_loss_difference": float((a - b).mean()), "note": "", "statistic_28": float(long.statistic),
+            "pvalue_28": float(long.pvalue), "lags_28": int(long.lags)}
 
 
 # Diebold–Mariano test of a model against the reference on per-origin losses of one sensor
@@ -393,8 +405,8 @@ def dm_base(metrics: pd.DataFrame, records: dict[str, dict]) -> pd.DataFrame:
 # The default families of the frozen protocol that need no choice from validation, for the models in the report:
 # - F1: each zero-shot TSFM against the reference;
 # - F2: chronos2 against each other zero-shot TSFM;
-# - F3: chronos2 against the best statistical baseline sf_mstl_arima (the best tuned trained model is added with
-#   extra tests once chosen on validation);
+# - F3: chronos2 against the statistical baselines sf_mstl_arima and ag_savg672 (protocol P3; the best tuned trained
+#   model is added with extra tests once chosen on validation);
 # - F4: chronos2 against each LLMTime model at its own context;
 # - F6: chronos2+stations against chronos2, at the long context and at 1 day.
 # F5, F7 and F3's trained model name models chosen on validation, so they come as extra tests.
@@ -407,8 +419,8 @@ def default_families(models: set[str], reference: tuple[str, int], zero_shot: di
     tests = [FamilyTest("F1", m, context, ref_model, f"{ref_days}d") for m in tsfms]
     if "chronos2" in models:
         tests += [FamilyTest("F2", "chronos2", context, m, context) for m in tsfms if m != "chronos2"]
-        if "sf_mstl_arima" in models:
-            tests.append(FamilyTest("F3", "chronos2", context, "sf_mstl_arima", context))
+        tests += [FamilyTest("F3", "chronos2", context, m, context) for m in ("sf_mstl_arima", "ag_savg672")
+                  if m in models]
         tests += [FamilyTest("F4", "chronos2", context, m, f"{max(c)}d") for m, c in llmtime.items() if m in models]
         if "chronos2+stations" in models:
             tests += [FamilyTest("F6", "chronos2+stations", c, "chronos2", c) for c in (context, "1d")]
@@ -432,6 +444,34 @@ def day_bootstrap(values: pd.Series, samples: int = BOOTSTRAP_SAMPLES,
     return float(values.mean()), float(low), float(high)
 
 
+# Circular block bootstrap of a per-origin series over consecutive Berlin calendar days (protocol P2): the days from
+# the first to the last origin's day form a circle, days without origins included as empty days (so a gap keeps its
+# length). Every resample joins ceil(n / block_days) blocks of block_days consecutive days, cut to n days, and takes
+# the mean over all origins of the drawn days. Returns the mean and its 95 % percentile interval.
+def block_bootstrap(values: pd.Series, block_days: int = BLOCK_DAYS, samples: int = BOOTSTRAP_SAMPLES,
+                    seed: int = BOOTSTRAP_SEED) -> tuple[float, float, float]:
+    by_day = values.groupby(_berlin_days(values.index))
+    days = pd.date_range(min(by_day.groups), max(by_day.groups), freq="D").date
+    sums = by_day.sum().reindex(days, fill_value=0.0).to_numpy()
+    counts = by_day.size().reindex(days, fill_value=0).to_numpy()
+    n = len(days)
+    starts = np.random.default_rng(seed).integers(0, n, size=(samples, math.ceil(n / block_days)))
+    pick = ((starts[:, :, None] + np.arange(block_days)) % n).reshape(samples, -1)[:, :n]
+    drawn = counts[pick].sum(axis=1)
+    if (drawn == 0).any():
+        raise ValueError("A BLOCK RESAMPLE DREW ONLY DAYS WITHOUT ORIGINS")
+    low, high = np.quantile(sums[pick].sum(axis=1) / drawn, [0.025, 0.975])
+    return float(values.mean()), float(low), float(high)
+
+
+# The wording rule of protocol P2 for a family test: "robust" when significant after Holm with both the primary lags
+# and DM_LONG_LAGS, "depends on the bandwidth" when with only one of them.
+def bandwidth_wording(primary: bool, long: bool) -> str:
+    if primary and long:
+        return "robust"
+    return "depends on the bandwidth" if primary or long else "not significant"
+
+
 # Holm's step-down correction of the p-values of one family. The family is declared in advance, so a test that
 # couldn't be computed (NaN, e.g. failed origins) still counts: as p = 1, so it can't shrink the family for the others.
 # Its own adjusted p-value stays NaN. Returns the adjusted p-values and whether each test is significant at ALPHA.
@@ -448,9 +488,11 @@ def holm(pvalues: pd.Series) -> tuple[pd.Series, pd.Series]:
 
 # The family tests at 24 h, per sensor both models ran on:
 # - DM on MAE (the family's test) and on QL (a second column; empty for point-only models);
-# - the mean MASE difference (model − against) with its day-bootstrap 95 % interval, and the difference relative to
-#   the other model's mean MASE;
-# - Holm's correction of the MAE p-values within each family.
+# - the mean MASE difference (model − against) with its 95 % intervals from the 7-day block bootstrap ("_block7",
+#   the effect-size interval of protocol P2) and the single-day bootstrap, and the difference relative to the other
+#   model's mean MASE;
+# - Holm's correction of the MAE p-values within each family, for the primary lags and for DM_LONG_LAGS ("_28"),
+#   and the bandwidth wording of the two decisions.
 # A negative difference or statistic means the model's loss is lower.
 def family_tests(metrics: pd.DataFrame, records: dict[str, dict], tests: list[FamilyTest]) -> pd.DataFrame:
     h = max(REPORT_STEPS)
@@ -479,17 +521,23 @@ def family_tests(metrics: pd.DataFrame, records: dict[str, dict], tests: list[Fa
             if set(a.index) == set(b.index) and not (a.isna().any() or b.isna().any()):
                 diff = a - b.loc[a.index]
                 mean, low, high = day_bootstrap(diff)
+                _, low7, high7 = block_bootstrap(diff)
                 row.update({"MASE_difference": mean, "MASE_difference_low": low, "MASE_difference_high": high,
                             "MASE_relative_difference": mean / float(b.mean()),
-                            "interval_excludes_0": bool(low > 0 or high < 0)})
+                            "interval_excludes_0": bool(low > 0 or high < 0),
+                            "MASE_difference_low_block7": low7, "MASE_difference_high_block7": high7,
+                            "interval_excludes_0_block7": bool(low7 > 0 or high7 < 0)})
             out.append(row)
     table = pd.DataFrame(out)
     if len(table):
-        table["pvalue_holm"], table["significant_holm"] = np.nan, False
-        for _, rows in table.groupby("family"):
-            adjusted, significant = holm(rows["pvalue"])
-            table.loc[rows.index, "pvalue_holm"] = adjusted
-            table.loc[rows.index, "significant_holm"] = significant
+        for suffix in ("", "_28"):
+            table[f"pvalue_holm{suffix}"], table[f"significant_holm{suffix}"] = np.nan, False
+            for _, rows in table.groupby("family"):
+                adjusted, significant = holm(rows[f"pvalue{suffix}"])
+                table.loc[rows.index, f"pvalue_holm{suffix}"] = adjusted
+                table.loc[rows.index, f"significant_holm{suffix}"] = significant
+        table["bandwidth"] = [bandwidth_wording(a, b) for a, b in zip(table["significant_holm"],
+                                                                      table["significant_holm_28"])]
     return table
 
 
@@ -687,18 +735,22 @@ def _type_tables(cell_table: pd.DataFrame, skill_table: pd.DataFrame, tasks: dic
     return parts
 
 
-# The family tests (Holm within each family): DM on MAE at 24 h and the MASE difference with its day-bootstrap
-# interval.
+# The family tests (Holm within each family): DM on MAE at 24 h with both lag settings and the bandwidth wording, and
+# the MASE difference with its block-bootstrap and day-bootstrap intervals.
 def _family_table(family_table: pd.DataFrame) -> str:
     if not len(family_table):
         return "# Test families\n\nNo family test has both of its models in this report.\n"
     columns = ["family", "model", "context", "against", "against_context", "sensor", "n_origins",
-               "mean_loss_difference", "pvalue", "pvalue_holm", "significant_holm", "MASE_difference",
+               "mean_loss_difference", "pvalue", "pvalue_holm", "significant_holm", "pvalue_28", "pvalue_holm_28",
+               "bandwidth", "MASE_difference", "MASE_difference_low_block7", "MASE_difference_high_block7",
                "MASE_difference_low", "MASE_difference_high", "note"]
     table = family_table[[c for c in columns if c in family_table]]
     return ("# Test families (frozen protocol F1-F7; Holm within each family, alpha 0.05)\n\n"
-            "DM on per-origin MAE at 24 h; MASE difference = model − against, 95 % interval from a bootstrap over "
-            f"whole Berlin days ({BOOTSTRAP_SAMPLES} resamples). Negative = the model is better.\n\n"
+            "DM on per-origin MAE at 24 h with statsmodels' lag rule (pvalue) and with "
+            f"{DM_LONG_LAGS} lags (pvalue_28, 7 days of origins); \"robust\" = significant after Holm under both "
+            "(protocol P2). MASE difference = model − against, with 95 % intervals from a circular bootstrap over "
+            f"blocks of {BLOCK_DAYS} Berlin calendar days (_block7, the effect-size interval) and over single Berlin "
+            f"days ({BOOTSTRAP_SAMPLES} resamples each). Negative = the model is better.\n\n"
             f"{_markdown(table)}\n")
 
 
@@ -814,9 +866,11 @@ def make_report(run_dirs: list[Path], out_root: Path, reference: tuple[str, int]
         "picks": {m: {"file": str(path), "sha256": hashlib.sha256(Path(path).read_bytes()).hexdigest()}
                   for m, path in (picks or {}).items()},
         "snapshot": first["snapshot"], "period": first["period"], "reference": list(reference),
-        "dm": {"horizon": DM_HORIZON, "harvey_adj": True}, "common_origins": n_common,
+        "dm": {"horizon": DM_HORIZON, "harvey_adj": True, "long_lags": DM_LONG_LAGS}, "common_origins": n_common,
         "families": None if families is None else [vars(test) for test in families],
         "holm_alpha": ALPHA, "bootstrap": {"samples": BOOTSTRAP_SAMPLES, "seed": BOOTSTRAP_SEED, "unit": "Berlin day"},
+        "block_bootstrap": {"samples": BOOTSTRAP_SAMPLES, "seed": BOOTSTRAP_SEED, "block_days": BLOCK_DAYS,
+                            "unit": "Berlin calendar day, circular"},
         "open_slots": None if snapshot_dir is None else {"context_days": OPEN_CONTEXT_DAYS,
                                                          "threshold": OPEN_THRESHOLD},
         "code": git_state(),
