@@ -7,7 +7,7 @@ services:
       args:
         WITH_TSFM: ${WITH_TSFM:-0}  # 1 adds Chronos-2 (provider "chronos-2"): WITH_TSFM=1 docker compose build
     ports:
-      - "8000:8000"
+      - "127.0.0.1:8000:8000"  # this machine only; serve others through a reverse proxy with TLS
     env_file:
       - .env
     restart: unless-stopped

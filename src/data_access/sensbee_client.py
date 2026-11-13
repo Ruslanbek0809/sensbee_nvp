@@ -22,6 +22,8 @@ from src.data_access.data_loader import EVENT_BASED_COLUMNS, fill_event_series
 load_dotenv()
 
 logger = logging.getLogger(__name__)
+# httpx logs every request URL at INFO, and the READ key travels in the URL. Only its warnings are kept.
+logging.getLogger("httpx").setLevel(logging.WARNING)
 
 DEFAULT_BASE_URL    = "https://sensbee.smartcity.ilmenau.de:8443"
 DEFAULT_SENSOR_ID   = os.getenv("MANEBACH_WEATHER_STATION_SENSOR_UUID")
@@ -85,7 +87,8 @@ class SensbeeClient:
             return resp.json()
 
 # Fetches a sensor time series from SensBee. The server pre-aggregates it into regular buckets (time_grouping).
-# The client fills any gaps that remain.
+# The client fills any gaps that remain. A missing api_key stays missing: the configured key is never used for
+# a caller who didn't send one.
 def load_sensor_series_from_api(
     sensor_id: Optional[str] = None,
     api_key: Optional[str] = None,
@@ -97,7 +100,6 @@ def load_sensor_series_from_api(
     base_url: Optional[str] = None,
 ) -> pd.Series:
     sensor_id   = sensor_id   or DEFAULT_SENSOR_ID
-    api_key     = api_key     or DEFAULT_API_KEY
     column_name = column_name or DEFAULT_COLUMN_NAME
     base_url    = base_url    or DEFAULT_BASE_URL
 

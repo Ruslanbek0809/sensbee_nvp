@@ -78,3 +78,26 @@ def test_read_key_is_not_logged(caplog):
 
     assert get.call_args.kwargs["params"]["key"] == "secret-read-key"
     assert "secret-read-key" not in caplog.text
+
+
+# A request without a key must reach SensBee without one, even when the server has a key configured.
+def test_missing_key_is_not_replaced_by_the_server_key(monkeypatch):
+    monkeypatch.setattr("src.data_access.sensbee_client.DEFAULT_API_KEY", "DUMMY-SERVER-KEY")
+    with patch.object(SensbeeClient, "get_sensor_data", autospec=True, side_effect=_fake_get_sensor_data) as get:
+        load_sensor_series_from_api(sensor_id="sensor-uuid", api_key=None, column_name="temperature", window_hours=2)
+
+    assert get.call_args.kwargs["api_key"] is None
+
+
+# httpx logs every request URL at INFO, and the READ key is a query parameter. Only the transport is patched, so
+# httpx's own client code (and its log line) runs.
+def test_httpx_request_log_has_no_key(caplog):
+    def handle_request(self, request: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, json=[], request=request)
+
+    caplog.set_level(logging.INFO)
+    with patch.object(httpx.HTTPTransport, "handle_request", autospec=True, side_effect=handle_request) as send:
+        SensbeeClient().get_sensor_data(sensor_id="sensor-uuid", api_key="CALLER-KEY-123", limit=5)
+
+    assert send.call_args.args[1].url.params["key"] == "CALLER-KEY-123"
+    assert "CALLER-KEY-123" not in caplog.text

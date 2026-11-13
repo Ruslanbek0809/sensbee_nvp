@@ -39,6 +39,21 @@ from .serialize import (
 load_dotenv()
 logger = logging.getLogger(__name__)
 
+# Model per provider when neither the request nor <PROVIDER>_MODEL in the environment names one: the RP's models.
+# The three hosted ones were shut down by 2026-11-13, and the current models tried live then did not work with these
+# calls (empty text from gpt-oss-120b, max_tokens rejected by gpt-6.1-terra).
+DEFAULT_MODELS = {
+    "mistral": "mistral-medium-2505",
+    "groq": "llama-3.3-70b-versatile",
+    "openai": "gpt-3.5-turbo-instruct",
+    "local": "llama2-7b",
+}
+
+
+# The model a provider uses when the request names none: <PROVIDER>_MODEL from the environment, else the default.
+def configured_model(provider: str) -> str:
+    return os.getenv(f"{provider.upper()}_MODEL", DEFAULT_MODELS[provider])
+
 
 # PROMPT TEMPLATES
 
@@ -73,7 +88,7 @@ def call_mistral_api(
         if not api_key:
             raise ValueError("MISTRAL_API_KEY not found")
         
-        model_name = model or os.getenv("MISTRAL_MODEL", "mistral-medium-2505")
+        model_name = model or configured_model("mistral")
         client = Mistral(api_key=api_key)
         
         logger.debug(f"CALLING MISTRAL API: MODEL={model_name}, PATHS={num_forecasts}")
@@ -115,7 +130,7 @@ def call_groq_api(
         if not api_key:
             raise ValueError("GROQ_API_KEY NOT FOUND")
         
-        model_name = model or os.getenv("GROQ_MODEL", "llama-3.3-70b-versatile")
+        model_name = model or configured_model("groq")
         client = Groq(api_key=api_key)
         
         # Choose the system message for this use case
@@ -155,7 +170,7 @@ def call_openai_api(
 ) -> List[str]:
     import openai
     
-    model_name = model or os.getenv("OPENAI_MODEL", "gpt-3.5-turbo-instruct") # os.getenv("OPENAI_MODEL", "gpt-4o-mini")
+    model_name = model or configured_model("openai")
     
     logger.debug(f"CALLING OPENAI API: MODEL={model_name}, PATHS={num_forecasts}")
     
@@ -205,7 +220,7 @@ def call_local_llm(
         if not is_local_llm_available():
             raise ValueError("LOCAL LLM NOT AVAILABLE. LOCAL LLM REQUIRES GPU (CUDA FOR NVIDIA, MPS FOR APPLE SILICON). USE API-BASED PROVIDERS (mistral, groq, openai) INSTEAD.")
         
-        model_name = model or os.getenv("LOCAL_MODEL", "llama2-7b")
+        model_name = model or configured_model("local")
         
         logger.info(f"USING LOCAL LLM: {model_name} WITH TOKEN CONTROL")
         

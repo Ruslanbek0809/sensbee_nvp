@@ -113,6 +113,8 @@ Service runs at: http://localhost:8000
 `/forecast/cache` => DELETE method that clears cache
 `/health` => GET method that checks health of the server and displays cache size
 
+The cache endpoints serve only forecasts made with the READ key sent in the `X-API-Key` header (without the header: forecasts made without a key).
+
 ### Request Parameters
 
 `sensor_id` => SensBee sensor UUID (required. Type: string)
@@ -120,7 +122,7 @@ Service runs at: http://localhost:8000
 `column` => Column to forecast (e.g., "temperature") (required. Type: string)
 `horizon_hours` => Forecast horizon (6-168 hours) (required. Type: int. Default is 24)
 `history_days` => Days of history to use: 1-14 for LLM providers (default 7), 1-28 for chronos-2 (default 28) (optional. Type: int)
-`provider` => mistral, groq, openai, local, or chronos-2 (required. Type: string. Default is groq)
+`provider` => mistral, groq, openai, local, or chronos-2 (required. Type: string. Default is groq). The hosted ones (mistral, groq, openai) work only if the server lists them in `HOSTED_PROVIDERS`, and only with the server's configured model
 `num_forecasts` => Number of LLM forecasts (1-20). Higher = better (required. Type: int. Default is 5)
 `temperature` => LLM temperature (0.1-1.5). Higher = diverse (required. Type: float. Default is 0.9)
 `use_normalization` => Applies LLMTime-style quantile scaling (optional. Type: bool. Default is true)

@@ -2,17 +2,23 @@
 # FastAPI service for on-demand next-value prediction of smart city sensor data. 
 
 import asyncio
+import hashlib
+import hmac
 import logging
+import os
 from contextlib import asynccontextmanager
 from datetime import datetime
 from importlib.util import find_spec
 from typing import Optional
 
-from fastapi import FastAPI, HTTPException
+import httpx
+from fastapi import FastAPI, Header, HTTPException
 from pydantic import BaseModel, Field
 
+from ..models.local_llm import LOCAL_MODELS
+from ..models.nvp_llms import DEFAULT_MODELS, configured_model
 from ..models.tsfm_forecaster import preload
-from .forecast_jobs import CHRONOS2_HISTORY_DAYS, forecast_single_column
+from .forecast_jobs import CHRONOS2_HISTORY_DAYS, CHRONOS2_PROVIDER, forecast_single_column
 
 # Configure logging
 logging.basicConfig(level=logging.INFO)
@@ -47,12 +53,13 @@ class ForecastRequest(BaseModel):
     )
     provider: str = Field(
         default="groq",
-        description="LLM provider: 'groq', 'openai', 'mistral', or 'local' (GPU required). "
-                    "'chronos-2' uses the Chronos-2 time-series model and also returns quantiles"
+        description="LLM provider: 'groq', 'openai', 'mistral' (only if the server enables them), or 'local' "
+                    "(GPU required). 'chronos-2' uses the Chronos-2 time-series model and also returns quantiles"
     )
     model: Optional[str] = Field(
         default=None,
-        description="Model name (optional). For local: 'mistral-7b' or 'llama2-7b'"
+        description="Model name (optional). For local: one of its presets, e.g. 'mistral-7b' or 'llama2-7b'. "
+                    "Hosted providers accept only the server's configured model; 'chronos-2' takes none"
     )
     num_forecasts: int = Field(
         default=5,
@@ -98,12 +105,55 @@ class ForecastResponse(BaseModel):
     model_info: Optional[dict] = None
 
 
-# In-memory cache of forecast responses.
-forecast_cache: dict[str, ForecastResponse] = {}
+# In-memory cache of forecast responses by sensor and column. Each entry also holds the digest of the READ key the
+# forecast was made with, and the cache endpoints serve it only to a caller who sends the same key (X-API-Key header).
+forecast_cache: dict[str, tuple[str, ForecastResponse]] = {}
 
 
 def build_cache_key(sensor_id: str, column: str) -> str:
     return f"{sensor_id}_{column}"
+
+
+# SHA-256 digest of a READ key, "" standing for no key. The cache keeps only the digest, never the key.
+def key_digest(api_key: Optional[str]) -> str:
+    return hashlib.sha256((api_key or "").strip().encode()).hexdigest()
+
+
+# Whether a cache entry was made with the caller's key (compared in constant time).
+def same_key(entry: tuple[str, ForecastResponse], api_key: Optional[str]) -> bool:
+    return hmac.compare_digest(entry[0], key_digest(api_key))
+
+
+HOSTED_PROVIDERS = ("groq", "openai", "mistral")  # called with the server's paid keys
+
+
+# The hosted providers this server may call, from the comma-separated HOSTED_PROVIDERS variable. Unset: none.
+def enabled_hosted_providers() -> set[str]:
+    return {name.strip().lower() for name in os.getenv("HOSTED_PROVIDERS", "").split(",") if name.strip()}
+
+
+# Checks the provider and model before any data is loaded or any model is called, and answers 400 otherwise.
+# - A hosted provider (groq, openai, mistral) must be enabled in HOSTED_PROVIDERS, and takes only its configured
+#   model, so a caller can't pick what the server's paid keys are spent on.
+# - "local" takes its presets or its configured model. Any other name would be downloaded from the Hugging Face Hub
+#   and loaded with trust_remote_code.
+# - "chronos-2" takes no model name.
+def check_provider_and_model(provider: str, model: Optional[str]) -> None:
+    if provider == CHRONOS2_PROVIDER:
+        allowed = set()
+    elif provider == "local":
+        allowed = set(LOCAL_MODELS) | {configured_model("local")}
+    elif provider in HOSTED_PROVIDERS:
+        if provider not in enabled_hosted_providers():
+            raise HTTPException(status_code=400, detail=f"PROVIDER NOT ENABLED on this server: {provider}. "
+                                                        f"The operator lists allowed hosted providers in HOSTED_PROVIDERS")
+        allowed = {configured_model(provider)}
+    else:
+        raise HTTPException(status_code=400, detail=f"UNKNOWN PROVIDER: {provider}. "
+                                                    f"SUPPORTED: {', '.join([*DEFAULT_MODELS, CHRONOS2_PROVIDER])}")
+    if model is not None and model not in allowed:
+        raise HTTPException(status_code=400, detail=f"MODEL NOT ALLOWED for provider {provider}: {model}. "
+                                                    f"ALLOWED: {', '.join(sorted(allowed)) or 'none (leave model empty)'}")
 
 
 # Loads Chronos-2 before the service accepts requests when chronos-forecasting is installed (the WITH_TSFM build), so
@@ -137,7 +187,9 @@ async def health_check() -> dict:
 @app.post("/forecast", response_model=ForecastResponse)
 async def generate_forecast(request: ForecastRequest) -> ForecastResponse:
     logger.info(f"/forecast Forecast POST request: sensor={request.sensor_id}, column={request.column}, horizon={request.horizon_hours}h, history={request.history_days}d, provider={request.provider}")
-    
+    provider = request.provider.lower()
+    check_provider_and_model(provider, request.model)
+
     try:
         # Run the forecast in a worker thread so it does not block the event loop.
         result = await asyncio.to_thread(
@@ -147,7 +199,7 @@ async def generate_forecast(request: ForecastRequest) -> ForecastResponse:
             column_name=request.column,
             horizon_hours=request.horizon_hours,
             history_days=request.history_days,
-            provider=request.provider,
+            provider=provider,
             model=request.model,
             num_forecasts=request.num_forecasts,
             temperature=request.temperature,
@@ -178,7 +230,7 @@ async def generate_forecast(request: ForecastRequest) -> ForecastResponse:
         
         # Cache the response
         cache_key = build_cache_key(request.sensor_id, request.column)
-        forecast_cache[cache_key] = response
+        forecast_cache[cache_key] = (key_digest(request.api_key), response)
         logger.info(f"/forecast CACHED forecast: {cache_key}")
         
         return response
@@ -186,32 +238,41 @@ async def generate_forecast(request: ForecastRequest) -> ForecastResponse:
     except ValueError as e:
         logger.error(f"/forecast INVALID VALUE error: {e}")
         raise HTTPException(status_code=400, detail=str(e))
+    # SensBee errors carry the request URL, and with it the READ key: only the status or error type goes out.
+    except httpx.HTTPStatusError as e:
+        logger.error(f"/forecast UPSTREAM FAILED: HTTP {e.response.status_code}")
+        raise HTTPException(status_code=502, detail=f"UPSTREAM REQUEST FAILED: HTTP {e.response.status_code}")
+    except httpx.HTTPError as e:
+        logger.error(f"/forecast UPSTREAM FAILED: {type(e).__name__}")
+        raise HTTPException(status_code=502, detail=f"UPSTREAM REQUEST FAILED: {type(e).__name__}")
     except Exception as e:
-        logger.error(f"/forecast Forecast FAILED: {e}")
-        raise HTTPException(status_code=500, detail=str(e))
+        logger.error(f"/forecast Forecast FAILED: {type(e).__name__}: {e}")
+        raise HTTPException(status_code=500, detail=f"FORECAST FAILED ({type(e).__name__})")
 
 
-# Returns the cached forecast for the sensor and column. Answers 404 if there is none.
+# Returns the cached forecast for the sensor and column. Answers 404 if there is none or it was made with another key,
+# so a caller without the key can't tell the two apart.
 @app.get("/forecast/cache/{sensor_id}/{column}", response_model=ForecastResponse)
-async def get_cached_forecast(sensor_id: str, column: str) -> ForecastResponse:
-    cache_key = build_cache_key(sensor_id, column)
-    
-    if cache_key not in forecast_cache:
+async def get_cached_forecast(sensor_id: str, column: str, x_api_key: Optional[str] = Header(default=None)) -> ForecastResponse:
+    entry = forecast_cache.get(build_cache_key(sensor_id, column))
+
+    if entry is None or not same_key(entry, x_api_key):
         raise HTTPException(
             status_code=404, 
             detail=f"NO CACHED forecast for sensor={sensor_id}, column={column}"
         )
     
-    response = forecast_cache[cache_key]
+    response = entry[1]
     response.cached = True
     return response
 
 
-# Lists all cached forecasts with their metadata.
+# Lists the cached forecasts made with the caller's key (without a key: those made without one), with their metadata.
 @app.get("/forecast/cache")
-async def list_cached_forecasts() -> dict:
+async def list_cached_forecasts(x_api_key: Optional[str] = Header(default=None)) -> dict:
+    items = [entry[1] for entry in forecast_cache.values() if same_key(entry, x_api_key)]
     return {
-        "count": len(forecast_cache),
+        "count": len(items),
         "forecasts": [
             {
                 "sensor_id": item.sensor_id,
@@ -219,16 +280,18 @@ async def list_cached_forecasts() -> dict:
                 "generated_at": item.generated_at,
                 "forecast_points": item.forecast_points,
             }
-            for item in forecast_cache.values()
+            for item in items
         ],
     }
 
 
-# Clears all cached forecasts.
+# Clears the cached forecasts made with the caller's key (without a key: those made without one).
 @app.delete("/forecast/cache")
-async def clear_cache() -> dict:
-    count = len(forecast_cache)
-    forecast_cache.clear()
+async def clear_cache(x_api_key: Optional[str] = Header(default=None)) -> dict:
+    mine = [cache_key for cache_key, entry in forecast_cache.items() if same_key(entry, x_api_key)]
+    for cache_key in mine:
+        del forecast_cache[cache_key]
+    count = len(mine)
     logger.info(f"Cache cleared: {count} forecasts removed")
     return {
         "cleared": count, 
