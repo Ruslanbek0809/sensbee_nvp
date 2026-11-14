@@ -23,6 +23,7 @@
 # - it changes the forecast when its future changes
 # - batch independence holds
 # - a forecaster trained with covariates refuses a forecast without them
+# Early stopping falls back to the last training item that can hold the tuning days (6a.11, D8).
 # Tuned configs (Phase 6a, D-E5):
 # - the grid has the planned 32 points, each differing from its model's default only in the grid's keys
 # - a tuned DeepAR config with calendar inputs feeds them to the network
@@ -154,6 +155,34 @@ def test_tuning_split_holds_out_the_final_days_one_window_each():
     assert all(t.index[-(96 + 191)] > train[1].index[-1] for t in tune)
     with pytest.raises(ValueError, match="TOO SHORT"):  # 1,057 steps left < a 1,055-step window plus a horizon
         tuning_split([first, last], 7, 863 + 192, holdout=191)
+
+
+# D8 (6a.11): under the January hall rules the last training item is the new season's 28 days. A model whose input
+# window and tuning days don't fit in it early-stops on the last item that can hold them; later items stay training
+# items. Nothing changes when the last item is long enough.
+def test_tuning_days_come_from_the_last_item_long_enough_for_them():
+    old = pd.Series(np.arange(40 * 96.0), index=pd.date_range("2025-10-11", periods=40 * 96, freq="15min"))
+    new = pd.Series(1.0, index=pd.date_range("2026-09-19", periods=28 * 96, freq="15min"))
+
+    train, tune = tuning_split([old, new], 7, 2688)  # tuned PatchTST c2688: 28 - 7 days can't hold 2,688 + 96 steps
+    assert train[1] is new and train[0].index[-1] == old.index[-1] - pd.Timedelta(days=7)
+    assert [t.index[-1] for t in tune] == [old.index[-1] - pd.Timedelta(days=k) for k in range(7)]
+
+    train, tune = tuning_split([old, new], 7, 672)  # PatchTST c672 fits in the new season, as before
+    assert train[0] is old and train[1].index[-1] == new.index[-1] - pd.Timedelta(days=7)
+    assert tune[0].index[-1] == new.index[-1]
+
+
+# AutoGluon trains when a training item after the tuning item is too short for one input window plus a horizon.
+def test_patchtst_fits_when_its_last_item_is_too_short_for_one_window():
+    trainer, _ = autogluon_trainer("PatchTST", SHORT_PATCHTST, tuning_days=TUNING_DAYS)
+    items, contexts = _data(days=20)
+    short = pd.Series(10.0, index=pd.date_range("2026-03-01", periods=5 * 96, freq="15min"))  # 480 < 672 + 96 steps
+    forecaster, info = trainer("S", [items[0], short], 0)
+
+    assert info["tuning_end"] == str(items[0].index[-1]) and info["training_rows"] == 13 * 96 + 5 * 96
+    batch, status = forecaster(contexts, HORIZON, QUANTILE_LEVELS, 0)
+    assert status == ["ok"] * 3 and np.isfinite(batch).all()
 
 
 def test_registered_deepar_values_only_with_early_stopping_on_the_final_week():

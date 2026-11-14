@@ -12,6 +12,9 @@
 # Test families (Phase 6a, frozen protocol F1-F7): the defaults that need no validation choice are always added
 # (benchmark.report.default_families, 28-day context); --test adds one chosen on validation, e.g. F5 or F7.
 # --snapshot gives the halls' open-slot coverage (COV80_open).
+# --task-set names the runs' tasks (benchmark/tasks.py; default october): the sensor groups and the open-slot halls.
+# "january" is built from --snapshot (the January snapshot), so it needs it. It must be the runs' own task set
+# (run.json "task_set"; runs without one used october).
 # --as NAME RUN... reports several runs (disjoint sensors) as one model NAME, e.g. a tuned model whose config was
 # picked per sensor; those runs needn't be listed under --runs again. Runs of one config with different seeds merged
 # this way are averaged per origin over the seeds.
@@ -39,6 +42,7 @@ sys.path.insert(0, str(PROJECT_ROOT))
 
 from benchmark.models import LLMTIME, REFERENCE, ZERO_SHOT  # noqa: E402
 from benchmark.report import FamilyTest, default_families, load_runs, make_report, picked_runs  # noqa: E402
+from benchmark.tasks import TASK_SETS, task_set  # noqa: E402
 
 
 # "model@28d" → ("model", "28d").
@@ -56,6 +60,8 @@ def main() -> None:
     parser.add_argument("--common-origins", action="store_true",
                         help="only the (sensor, origin) pairs that every run evaluated")
     parser.add_argument("--snapshot", type=Path, help="the runs' snapshot, for the halls' open-slot coverage")
+    parser.add_argument("--task-set", choices=TASK_SETS, default="october",
+                        help="the runs' task set (january needs --snapshot)")
     parser.add_argument("--as", dest="aliases", nargs="+", action="append", default=[], metavar="NAME RUN",
                         help="report the following run folders as one model NAME (repeatable)")
     parser.add_argument("--picks", nargs="+", action="append", default=[], metavar="NAME PICKS_CSV RUN",
@@ -65,6 +71,9 @@ def main() -> None:
                         help="an extra family test chosen on validation (repeatable)")
     args = parser.parse_args()
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s")
+    if args.task_set != "october" and args.snapshot is None:
+        parser.error(f"--task-set {args.task_set} is built from the snapshot: give --snapshot")
+    tasks, _ = task_set(args.task_set, args.snapshot)
     if any(len(group) < 2 for group in args.aliases):
         parser.error("--as needs a NAME and at least one run folder")
     if any(len(group) < 3 for group in args.picks):
@@ -79,11 +88,14 @@ def main() -> None:
         picks[name] = Path(picks_csv)
         runs += [Path(run) for run in picked]
     records, _ = load_runs(runs, aliases, sensors)
+    run_set = next(iter(records.values()))["task_set"]  # load_runs refuses runs of different task sets
+    if run_set != args.task_set:
+        parser.error(f"the runs are of task set {run_set}, not {args.task_set}: give --task-set {run_set}")
     families = default_families(set(records), REFERENCE, {m: b.contexts for m, b in ZERO_SHOT.items()},
                                 {m: b.contexts for m, b in LLMTIME.items()})
     families += [FamilyTest(family, *_model_context(model), *_model_context(against))
                  for family, model, against in args.test]
-    report_dir = make_report(runs, args.out, REFERENCE, common=args.common_origins, families=families,
+    report_dir = make_report(runs, args.out, REFERENCE, tasks=tasks, common=args.common_origins, families=families,
                              snapshot_dir=args.snapshot, aliases=aliases, sensors=sensors, picks=picks)
     print((report_dir / "summary.md").read_text())
     print(f"REPORT WRITTEN to {report_dir}", file=sys.stderr)

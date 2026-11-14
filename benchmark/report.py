@@ -85,7 +85,8 @@ class FamilyTest:
 
 
 # Reads each run's run.json and metrics.csv.
-# Refuses runs that differ in snapshot, period or settings, and two runs of the same model.
+# Refuses runs that differ in snapshot, period, settings or task set, and two runs of the same model.
+# A run.json without "task_set" predates the task sets (6a.11) and used the october set.
 # aliases (run folder → model name) reports several runs as one model (Phase 6a). Every merged run must be listed in
 # aliases and agree on point_only, the oracle flag and the origin stride. Merged runs are either
 # - different configs on disjoint sensors, e.g. a tuned model whose configs were picked per sensor on validation, or
@@ -104,11 +105,13 @@ def load_runs(run_dirs: list[Path], aliases: Optional[dict[str, str]] = None,
     records, frames, first = {}, [], None
     for run_dir in run_dirs:
         record = json.loads((Path(run_dir) / "run.json").read_text())
-        same = (record["snapshot"], record["period"], record["settings"])
+        record.setdefault("task_set", "october")
+        same = (record["snapshot"], record["period"], record["settings"], record["task_set"])
         if first is None:
             first = same
         elif same != first:
-            raise ValueError(f"RUN {record['run_id']} DIFFERS IN SNAPSHOT, PERIOD OR SETTINGS from the first run")
+            raise ValueError(f"RUN {record['run_id']} DIFFERS IN SNAPSHOT, PERIOD, SETTINGS OR TASK SET from the first "
+                             f"run")
         keep = sensors.get(str(Path(run_dir)))
         dropped = []
         if keep is not None:

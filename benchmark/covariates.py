@@ -31,7 +31,8 @@
 # 50.687 N, 10.914 E, checked 2026-10-14). The weather stations lie within about 10 km, which moves the sun angle by
 # a fraction of a degree.
 # The opening profile (D4-1): per Berlin weekday and 15-min local slot, the share of days with visitors_total > 0.
-# It is taken from the hall's training data before the cutoff (from task.train_start, without the task's exclusions).
+# It is taken from the hall's training data before the cutoff (from task.train_start, without the task's exclusions;
+# from task.season_start when set, the current season only under the January hall rules, P1).
 # It is fitted once per sensor and period, like a trained model. Every forecast window uses that cutoff profile
 # (all of it lies before the origin).
 # A trained model's training rows get a profile from earlier weeks only (D-E8, 2026-10-22; training_open_share):
@@ -185,9 +186,12 @@ def series_open_profile(series: pd.Series) -> np.ndarray:
 
 
 # Opening profile of a hall, shape [7 weekdays, 96 slots]: the share of days with visitors > 0 in the training data
-# before the cutoff (from task.train_start, without the task's exclusions).
+# before the cutoff (from task.train_start, or from task.season_start when set: the current season only, P1; without
+# the task's exclusions).
 def open_profile(series: pd.Series, task: SensorTask, cutoff: pd.Timestamp) -> np.ndarray:
     history = training_history(series, task, cutoff)
+    if task.season_start is not None:
+        history = history.loc[pd.Timestamp(task.season_start):]
     return series_open_profile(history[~_excluded(history.index, task)])
 
 
@@ -324,9 +328,11 @@ def coverage(frame: pd.DataFrame, kinds: dict[str, str], start: pd.Timestamp, en
 
 # Known columns of a covariate frame strictly before the cutoff: what a trainer may use for its training items.
 # open_share is replaced by its earlier-weeks values (training_open_share, D-E8).
+# Rows inside the task's exclusions are left out, as they are of the training items (a closed season's weeks have no
+# earlier-weeks share).
 # The frame starts at its first row where every column is defined, and the trainer's items are cut to it
 # (runner._fit). A gap after that start is an error.
-# series, task: the sensor's target and task, needed only when the frame has open_share.
+# series, task: the sensor's target and task, needed when the frame has open_share or the task has exclusions.
 def training_covariates(frame: pd.DataFrame, kinds: dict[str, str], cutoff: pd.Timestamp,
                         series: Optional[pd.Series] = None,
                         task: Optional[SensorTask] = None) -> Optional[pd.DataFrame]:
@@ -334,6 +340,8 @@ def training_covariates(frame: pd.DataFrame, kinds: dict[str, str], cutoff: pd.T
     if not known:
         return None
     rows = frame.loc[: cutoff - STEP, known].copy()
+    if task is not None:
+        rows = rows[~_excluded(rows.index, task)]
     if "open_share" in known:
         rows["open_share"] = training_open_share(series, task, cutoff, rows.index)
     defined = rows.notna().all(axis=1).to_numpy()

@@ -1,6 +1,6 @@
 # Tests for benchmark/report.py on tiny harness runs over a synthetic snapshot (no network):
 # - the files, and the reference against itself
-# - refusal of mixed snapshots
+# - refusal of mixed snapshots and of mixed task sets (6a.11)
 # - point-only models without probabilistic metrics
 # - failed origins left unimputed
 # - the negative-quantile share, and the clipped visitor table on a hand example
@@ -104,6 +104,24 @@ def test_runs_from_different_snapshots_are_refused(tmp_path):
     other = _run(tmp_path, seasonal_naive_forecaster(96), "snaive", _snapshot(tmp_path, "other", shift=1.0))
     with pytest.raises(ValueError, match="DIFFERS"):
         make_report([first, other], tmp_path / "reports", ("snaive", 1), tasks=_snapshot(tmp_path)[1])
+
+
+# 6a.11: runs of different task sets don't mix; a run.json without "task_set" (before 6a.11) counts as october.
+def test_runs_from_different_task_sets_are_refused(tmp_path):
+    snapshot_dir, tasks = _snapshot(tmp_path)
+    old = _run(tmp_path, seasonal_naive_forecaster(96), "snaive", (snapshot_dir, tasks))
+    record = json.loads((old / "run.json").read_text())
+    del record["task_set"]
+    (old / "run.json").write_text(json.dumps(record))
+    october = run(naive_forecaster, "naive", snapshot_dir, tmp_path / "runs", tasks=tasks, context_days=(1,),
+                  run_id="naive", task_set="october")
+    january = run(naive_forecaster, "naive_jan", snapshot_dir, tmp_path / "runs", tasks=tasks, context_days=(1,),
+                  run_id="naive_jan", task_set="january")
+
+    records, _ = load_runs([old, october])
+    assert {r["task_set"] for r in records.values()} == {"october"}
+    with pytest.raises(ValueError, match="TASK SET"):
+        load_runs([old, january])
 
 
 def test_point_only_models_get_no_probabilistic_metrics(tmp_path):

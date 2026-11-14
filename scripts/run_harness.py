@@ -3,6 +3,8 @@
 #
 # --dry-run lists the forecast origins per sensor (valid, and why the others are not) and writes nothing.
 # With --contexts, the validity rule also covers those context lengths, as in a run.
+# --task-set picks the tasks (benchmark/tasks.py): "october" (default, TASKS) or "january", built from the snapshot
+# with the January hall rules (P1). Its notes (hall reopenings, season ends, windows, sensors left out) are printed.
 #
 # Without --dry-run, one forecaster runs over the tasks. It writes raw forecasts, metrics and a run manifest to a new
 # folder under --out. Then it prints the mean metrics per sensor, context and horizon. The forecaster is one of:
@@ -31,6 +33,7 @@
 # Usage (from sensbee_nvp/):
 #   venv/bin/python scripts/run_harness.py --snapshot ../../benchmark_data/snapshots/sensbee-2026-10-01 --dry-run
 #   venv/bin/python scripts/run_harness.py --snapshot <dir> --dry-run --contexts 1 2 7 14 28 56 85 169
+#   venv/bin/python scripts/run_harness.py --snapshot <january snapshot> --task-set january --dry-run
 #   venv/bin/python scripts/run_harness.py --snapshot <dir> --out <dir> --model seasonal_naive_96
 #   venv/bin/python scripts/run_harness.py --snapshot <dir> --out <dir> --model seasonal_naive_672 --contexts 28
 #   venv/bin/python scripts/run_harness.py --snapshot <dir> --out <dir> --model naive --origin-stride 7
@@ -45,6 +48,7 @@
 #       --sensors STUTZERBACH_WEATHER_STATION EISHALLE --origin-stride 7
 
 import argparse
+import json
 import sys
 from pathlib import Path
 from typing import Optional
@@ -62,7 +66,9 @@ from benchmark.models import (  # noqa: E402
 )
 from benchmark.runner import CHECK_FORECASTERS, run  # noqa: E402
 from benchmark.snapshot import load_snapshot  # noqa: E402
-from benchmark.tasks import CONTEXT_DAYS, TASKS, origin_table, target_series, validity_context_days  # noqa: E402
+from benchmark.tasks import (  # noqa: E402
+    CONTEXT_DAYS, TASK_SETS, TASKS, SensorTask, origin_table, target_series, task_set, validity_context_days,
+)
 
 INVALID_REASONS = ("excluded", "short_history", "target_gap", "recent_gap", "low_coverage")
 
@@ -72,18 +78,19 @@ INVALID_REASONS = ("excluded", "short_history", "target_gap", "recent_gap", "low
 # - the count per reason for the invalid ones;
 # - the lowest 7-day context coverage among the valid origins (and of the longest checked context);
 # - how many valid origins have an exclusion inside their context.
-# context_days: context lengths checked on top of CONTEXT_DAYS, as in a run.
-def dry_run(snapshot_dir: Path, sensors: list[str], period: str,
+# tasks: the task set's tasks of the listed sensors. context_days: context lengths checked on top of CONTEXT_DAYS, as
+# in a run.
+def dry_run(snapshot_dir: Path, tasks: dict[str, SensorTask], period: str,
             context_days: tuple[Optional[int], ...] = ()) -> pd.DataFrame:
     frames = load_snapshot(snapshot_dir)
     longest = max(validity_context_days(context_days))
     rows = []
-    for name in sensors:
-        table = origin_table(target_series(frames[name], TASKS[name]), TASKS[name], period, context_days)
+    for name, task in tasks.items():
+        table = origin_table(target_series(frames[name], task), task, period, context_days)
         valid = table[table["valid"]]
         rows.append({
             "sensor": name,
-            "secondary": TASKS[name].secondary,
+            "secondary": task.secondary,
             "candidates": len(table),
             "valid": len(valid),
             **{reason: int((table["reason"] == reason).sum()) for reason in INVALID_REASONS},
@@ -116,7 +123,9 @@ def main() -> None:
                                             *LLMTIME, *MASKED],
                         help="check forecaster, baseline, zero-shot, trained, fine-tuned or LLMTime model")
     parser.add_argument("--dry-run", action="store_true", help="list the origins per sensor and write nothing")
-    parser.add_argument("--sensors", nargs="+", choices=list(TASKS), default=list(TASKS))
+    parser.add_argument("--task-set", choices=TASK_SETS, default="october",
+                        help="the tasks: october (TASKS) or january (built from the snapshot, hall rules P1)")
+    parser.add_argument("--sensors", nargs="+", choices=list(TASKS), help="default: every sensor of the task set")
     parser.add_argument("--period", choices=["test", "validation"], default="test")
     parser.add_argument("--contexts", nargs="+",
                         help="context lengths in days, or 'all' for the whole history before each origin "
@@ -133,9 +142,17 @@ def main() -> None:
                         help="trained models: one fit per sensor kind on all its sensors' data (run name + '_pooled')")
     args = parser.parse_args()
     requested = None if args.contexts is None else tuple(None if c == "all" else int(c) for c in args.contexts)
+    tasks, notes = task_set(args.task_set, args.snapshot)
+    if notes:
+        print(json.dumps(notes, indent=2), file=sys.stderr)
+    sensors = list(tasks) if args.sensors is None else args.sensors
+    missing = [sensor for sensor in sensors if sensor not in tasks]
+    if missing:
+        parser.error(f"{missing} are not in the {args.task_set} task set (notes: {[notes.get(s) for s in missing]})")
+    tasks = {sensor: tasks[sensor] for sensor in sensors}
 
     if args.dry_run:
-        print(dry_run(args.snapshot, args.sensors, args.period, requested or ()).to_string(index=False))
+        print(dry_run(args.snapshot, tasks, args.period, requested or ()).to_string(index=False))
         return
     if args.out is None or args.model is None:
         parser.error("--out and --model are required unless --dry-run")
@@ -182,10 +199,10 @@ def main() -> None:
         # base_model: the report tests a widened run against its raw run
         params = {**params, "band_factor": args.band_factor, "base_model": name}
         name = f"{name}_w{args.band_factor:g}"
-    run_dir = run(forecaster, name, args.snapshot, args.out, tasks={sensor: TASKS[sensor] for sensor in args.sensors},
+    run_dir = run(forecaster, name, args.snapshot, args.out, tasks=tasks,
                   period=args.period, context_days=contexts, seed=args.seed, model_params=params,
                   model_info=model_info, trainer=trainer, origin_stride=args.origin_stride,
-                  covariates=args.covariates, pooled=args.pooled)
+                  covariates=args.covariates, pooled=args.pooled, task_set=args.task_set)
     with pd.option_context("display.width", 200, "display.max_rows", 500):
         print(summarize(run_dir).round(4).to_string())
     print(f"RUN WRITTEN to {run_dir}", file=sys.stderr)

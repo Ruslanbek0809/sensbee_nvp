@@ -14,7 +14,9 @@
 # - Phase 6a: the holiday table to 2027-04-01; training rows' opening profile from earlier weeks only (D-E8) and the
 #   training items starting where it is defined; "stations96" (neighbours 24 h earlier, known) and "wx" (Manebach
 #   weather for the halls, past) leak nothing at or after the origin
+# - Phase 6a step 6a.11 (P1): the season profile from the current season only; a trainer's rows skip a closed season
 
+import dataclasses
 import json
 from datetime import date, timedelta
 from pathlib import Path
@@ -432,3 +434,39 @@ def test_wx_gives_a_hall_the_station_weather_as_past_only():
     context_index = pd.date_range(origin - pd.Timedelta("1D"), origin, freq="15min", inclusive="left")
     window = cov.covariate_window(frame, kinds, origin, context_index)
     assert window.loc[origin:].isna().all().all() and window.loc[:origin - pd.Timedelta("15min")].notna().all().all()
+
+
+# A hall over two seasons for the January rules (6a.11, P1): the old season (2025-10-04 .. 2026-03-31) open
+# 06:00-20:00 UTC, closed in the summer, the new one (from 2026-09-05) open 06:00-22:00 UTC. Its task cuts the summer as
+# a closed season and starts the season profile at the new season. Cutoff 2026-10-03 (all of the new season in CEST).
+def _two_seasons() -> tuple[pd.Series, SensorTask, pd.Timestamp]:
+    index = pd.date_range("2025-10-04", "2026-10-31", freq="15min", inclusive="left")
+    old = (index < pd.Timestamp("2026-04-01")) & (index.hour >= 6) & (index.hour < 20)
+    new = (index >= pd.Timestamp("2026-09-05")) & (index.hour >= 6) & (index.hour < 22)
+    series = pd.Series(np.where(old | new, 5.0, 0.0), index=index)
+    task = SensorTask("visitors_total", "MAX", "visitors", "2026-10-03", "2026-10-31",
+                      (("2026-04-01", "2026-09-05", "closed season (P1)"),), train_start="2025-10-04",
+                      season_start="2026-09-05")
+    return series, task, pd.Timestamp("2026-10-03")
+
+
+# 21:00 UTC is 23:00 in Berlin summer time (slot 92): open every day of the new season, never in the old one.
+def test_the_season_profile_is_1_for_a_slot_open_every_week_of_the_current_season():
+    series, task, cutoff = _two_seasons()
+    profile = cov.open_profile(series, task, cutoff)
+    whole = cov.open_profile(series, dataclasses.replace(task, season_start=None), cutoff)
+
+    assert np.nanmax(profile) == 1.0
+    assert (profile[:, 92] == 1.0).all()
+    assert (whole[:, 92] < 0.25).all()  # both seasons: 4 open weeks out of about 30
+
+
+# The training rows of a +cal_open trainer skip the closed season (its weeks have no earlier-weeks profile).
+def test_training_covariates_leave_out_the_closed_season():
+    series, task, cutoff = _two_seasons()
+    frame, kinds, _ = cov.build("cal_open", "H", {}, series, task, cutoff)
+    rows = cov.training_covariates(frame, kinds, cutoff, series, task)
+
+    assert not ((rows.index >= pd.Timestamp("2026-04-01")) & (rows.index < pd.Timestamp("2026-09-05"))).any()
+    assert rows.index[-1] == cutoff - pd.Timedelta("15min") and not rows.isna().any().any()
+    assert (rows.loc["2026-09-05":, "open_share"] < 1).any()  # new-season rows still learn from the old season (D5)

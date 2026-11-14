@@ -6,6 +6,7 @@
 # - the trainer hook of fitted models (once per sensor, only data before the period, a failed fit fails the sensor)
 # - the origin stride and a forecaster's diagnostics
 # - pooled fits: one fit per sensor kind, cut at the kind's earliest period start, and their refusals
+# - a January task set built from a snapshot: a hall is fitted up to its window start (6a.11, P1)
 
 import json
 from pathlib import Path
@@ -16,7 +17,7 @@ import pytest
 
 from benchmark.runner import CHECK_FORECASTERS, _predict, naive_forecaster, run
 from benchmark.snapshot import MANIFEST_NAME, sha256_file, write_raw_csv
-from benchmark.tasks import HORIZON, QUANTILE_LEVELS, SensorTask
+from benchmark.tasks import HORIZON, QUANTILE_LEVELS, SensorTask, task_set
 
 QUANTILE_COLUMNS = [f"q{level:g}" for level in QUANTILE_LEVELS]
 
@@ -262,6 +263,36 @@ def test_a_failed_fit_fails_every_origin_of_that_sensor(tmp_path):
                                                                      "crossed_steps": 0}
     forecasts = pd.read_csv(run_dir / "forecasts.csv.gz")
     assert len(forecasts) == 13 * 2 * 96 and forecasts[QUANTILE_COLUMNS].isna().all().all()
+
+
+# The January set (6a.11, P1) built from a snapshot with two synthetic halls (conftest.py): Schwimmhalle reopened
+# 2026-09-19, so its window and its training cutoff start 2026-10-17; Eishalle has not reopened and is left out.
+def test_a_january_snapshot_fits_a_hall_up_to_its_window_start(tmp_path, hall_raw, hall_days):
+    snapshot_dir = tmp_path / "snapshot"
+    sensors = {}
+    for name, hall in (("EISHALLE", "ice"), ("SCHWIMMHALLE", "swim")):
+        sha256 = write_raw_csv(hall_raw(hall_days(hall)), snapshot_dir / "raw" / f"{name}.csv.gz")
+        sensors[name] = {"file": f"raw/{name}.csv.gz", "sha256": sha256}
+    (snapshot_dir / MANIFEST_NAME).write_text(json.dumps(
+        {"snapshot_id": "test-january", "until": "2027-01-10T00:00:00", "sensors": sensors}))
+    tasks, notes = task_set("january", snapshot_dir)
+    calls = []
+    run_dir = run(None, "trained", snapshot_dir, tmp_path / "runs", tasks={"SCHWIMMHALLE": tasks["SCHWIMMHALLE"]},
+                  context_days=(28,), trainer=_recording_trainer(calls), task_set="january")
+
+    assert "EISHALLE" not in tasks and notes["EISHALLE"]["status"] == "not reopened"
+    record = _record(run_dir)
+    assert record["task_set"] == "january"
+    assert record["counts"]["SCHWIMMHALLE"]["fit"]["cutoff"].startswith("2026-10-17")
+    assert record["tasks"]["SCHWIMMHALLE"]["season_start"] == "2026-09-19"
+    items = calls[0][1]
+    assert [(str(i.index[0]), str(i.index[-1])) for i in items] == [
+        ("2025-10-11 00:00:00", "2026-04-13 08:15:00"), ("2026-04-14 15:00:00", "2026-05-16 23:45:00"),
+        ("2026-09-19 00:00:00", "2026-10-16 23:45:00")]
+    origins = pd.read_csv(run_dir / "origins.csv", parse_dates=["origin"])
+    assert origins["valid"].all()
+    assert origins["origin"].min() == pd.Timestamp("2026-10-17") and origins["origin"].max() == pd.Timestamp(
+        "2027-01-09")
 
 
 def test_origin_stride_keeps_every_kth_valid_origin(tmp_path):

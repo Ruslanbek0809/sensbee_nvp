@@ -5,6 +5,8 @@
 # - the scale's exclusions
 # - nothing at or after an origin reaches its context or scale
 # - the training items of fitted models (gap splits, minimum length, train_start, exclusions)
+# - the task sets: the October set unchanged; the January set's hall rules (P1: reopening day, season end, window,
+#   training cut at the window start without the closed season)
 
 import dataclasses
 import math
@@ -17,8 +19,9 @@ import pytest
 
 from benchmark.metrics import seasonal_scale
 from benchmark.tasks import (
-    GUARD, TASKS, SensorTask, candidate_origins, context_window, origin_table, period_bounds, scale_history,
-    target_series, target_window, training_items, training_series,
+    GUARD, STREAM_OUTAGE, TASKS, SensorTask, candidate_origins, context_window, january_tasks, open_days,
+    origin_table, period_bounds, reopening_day, scale_history, season_end, target_series, target_window, task_set,
+    training_items, training_series,
 )
 from src.data_access.sensbee_client import SensbeeClient, load_sensor_series_from_api
 
@@ -259,3 +262,109 @@ def test_training_items_never_reach_the_cutoff(kind):
 def test_hall_training_starts_at_the_season_start():
     assert TASKS["EISHALLE"].train_start == TASKS["SCHWIMMHALLE"].train_start == "2025-10-10"
     assert all(task.train_start is None for name, task in TASKS.items() if task.kind != "visitors")
+
+
+# Task sets (6a.11): the January set from a snapshot, with the hall rules of protocol P1 (plan
+# docs/plans/2026-11-14-phase-6a-11-task-sets-january-rules.md, decisions D1-D10). The synthetic halls of conftest.py
+# carry the October snapshot's stray days (2025-07-08, 2025-10-10, 2026-09-08, 09-17, 09-29) and late-May trickle days.
+JANUARY_UNTIL = pd.Timestamp("2027-01-10")
+WEATHER = ("MANEBACH_WEATHER_STATION", "STUTZERBACH_WEATHER_STATION", "FRAUENWALD_WEATHER_STATION")
+
+
+# Open days (>= 16 nonzero buckets on a UTC date) of a synthetic hall.
+def _open(hall_raw, counts, **kwargs) -> pd.Series:
+    return open_days(target_series(hall_raw(counts, **kwargs), TASKS["SCHWIMMHALLE"]))
+
+
+# The January set over the two synthetic halls (Schwimmhalle optionally reopening on `reopen`).
+def _january(hall_raw, hall_days, reopen=None):
+    frames = {"EISHALLE": hall_raw(hall_days("ice")), "SCHWIMMHALLE": hall_raw(hall_days("swim", reopen))}
+    return january_tasks(frames, JANUARY_UNTIL)
+
+
+def test_the_reopening_day_skips_the_stray_days(hall_raw, hall_days):
+    swim, ice = _open(hall_raw, hall_days("swim")), _open(hall_raw, hall_days("ice"))
+    june_2025, june_2026 = pd.Timestamp("2025-06-01"), pd.Timestamp("2026-06-01")
+
+    assert reopening_day(swim, june_2026) == pd.Timestamp("2026-09-19")  # not 09-08, 09-17 or the lone 08-10
+    assert reopening_day(ice, june_2026) is None                         # one count on 09-29 is no reopening
+    # Not Eishalle's lone full test day 2025-07-08, nor the 9-bucket 2025-10-10.
+    assert reopening_day(swim, june_2025) == reopening_day(ice, june_2025) == pd.Timestamp("2025-10-11")
+    # The 7-day span must lie inside the data: with data to 09-23 only 5 days from 09-19 exist.
+    assert reopening_day(_open(hall_raw, hall_days("swim"), until="2026-09-24"), june_2026) is None
+    full_week = _open(hall_raw, hall_days("swim"), until="2026-09-26")
+    assert reopening_day(full_week, june_2026) == pd.Timestamp("2026-09-19")
+
+
+def test_the_season_ends_on_the_last_open_day_that_ends_a_full_week(hall_raw, hall_days):
+    june_2026 = pd.Timestamp("2026-06-01")
+    # Not 2026-05-29 (16 buckets) after the trickle days of late May.
+    assert season_end(_open(hall_raw, hall_days("swim")), june_2026) == pd.Timestamp("2026-05-16")
+    assert season_end(_open(hall_raw, hall_days("ice")), june_2026) == pd.Timestamp("2026-03-28")
+
+
+def test_the_january_set_from_a_snapshot(hall_raw, hall_days):
+    tasks, notes = _january(hall_raw, hall_days)
+
+    assert sorted(tasks) == sorted([*WEATHER, "SCHWIMMHALLE"])  # parking excluded, Eishalle not reopened
+    for name in WEATHER:
+        assert tasks[name] == dataclasses.replace(TASKS[name], test_start="2026-10-01", test_end="2027-01-10")
+    swim = tasks["SCHWIMMHALLE"]
+    assert (swim.column, swim.aggregation, swim.kind) == ("visitors_total", "MAX", "visitors")
+    assert (swim.train_start, swim.season_start, swim.test_start, swim.test_end) == (
+        "2025-10-11", "2026-09-19", "2026-10-17", "2027-01-10")
+    assert swim.exclusions == (STREAM_OUTAGE, ("2026-05-17", "2026-09-19", "closed season (P1)"))
+    assert notes["SCHWIMMHALLE"]["status"] == "ok"
+    assert notes["SCHWIMMHALLE"]["reopenings"] == ["2025-10-11", "2026-09-19"]
+    assert notes["SCHWIMMHALLE"]["season_ends"] == ["2026-05-16"]
+    assert notes["EISHALLE"]["status"] == "not reopened"
+    assert notes["PARKPLATZ_EAZ"]["status"] == "excluded"
+    assert period_bounds(swim, "test") == (pd.Timestamp("2026-10-17"), JANUARY_UNTIL)
+
+
+# Window start = reopening + 28 days, but not before 2026-10-01; a window shorter than 14 days is not scored.
+@pytest.mark.parametrize("reopen, start", [
+    ("2026-08-20", "2026-10-01"), ("2026-11-20", "2026-12-18"), ("2026-11-29", "2026-12-27"),
+    ("2026-11-30", None), ("2026-12-20", None)])
+def test_a_hall_window_starts_28_days_after_reopening_and_needs_14_days(hall_raw, hall_days, reopen, start):
+    tasks, notes = _january(hall_raw, hall_days, reopen)
+    if start is None:
+        assert "SCHWIMMHALLE" not in tasks and notes["SCHWIMMHALLE"]["status"] == "too short"
+    else:
+        assert tasks["SCHWIMMHALLE"].test_start == start and tasks["SCHWIMMHALLE"].season_start == reopen
+
+
+def test_no_january_hall_training_row_at_or_after_the_cutoff(hall_raw, hall_days):
+    tasks, _ = _january(hall_raw, hall_days)
+    task = tasks["SCHWIMMHALLE"]
+    cutoff = period_bounds(task, "test")[0]
+    raw = hall_raw(hall_days("swim"))
+    changed = raw.assign(visitors_total=np.where(raw["created_at"] >= cutoff, 99.0, raw["visitors_total"]))
+    items = training_items(target_series(raw, task), task, cutoff)
+    changed_items = training_items(target_series(changed, task), task, cutoff)
+
+    assert items[-1].index[-1] == cutoff - pd.Timedelta("15min")
+    assert len(items) == len(changed_items)
+    for a, b in zip(items, changed_items):
+        pd.testing.assert_series_equal(a, b)
+
+
+def test_no_closed_season_row_in_a_january_hall_training_item(hall_raw, hall_days):
+    tasks, _ = _january(hall_raw, hall_days)
+    task = tasks["SCHWIMMHALLE"]
+    items = training_items(target_series(hall_raw(hall_days("swim")), task), task, period_bounds(task, "test")[0])
+    stamps = pd.DatetimeIndex(np.concatenate([item.index for item in items]))
+
+    # The summer with its trickle and stray days (2026-05-17 .. 09-18) and everything before the first reopening
+    # (the 2025-07-08 test day, 2025-10-10) are left out; the outage of April 2026 splits the old season.
+    assert not ((stamps >= pd.Timestamp("2026-05-17")) & (stamps < pd.Timestamp("2026-09-19"))).any()
+    assert [(str(i.index[0]), str(i.index[-1])) for i in items] == [
+        ("2025-10-11 00:00:00", "2026-04-13 08:15:00"), ("2026-04-14 15:00:00", "2026-05-16 23:45:00"),
+        ("2026-09-19 00:00:00", "2026-10-16 23:45:00")]
+
+
+def test_the_october_set_is_the_static_tasks(tmp_path):
+    assert task_set("october", tmp_path) == (TASKS, {})
+    assert all(task.season_start is None for task in TASKS.values())
+    with pytest.raises(ValueError, match="UNKNOWN TASK SET"):
+        task_set("external", tmp_path)

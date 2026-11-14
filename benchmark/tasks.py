@@ -10,14 +10,29 @@
 # - Weather targets are never filled. An origin whose window has a gap is invalid, and only contexts are forward-filled.
 # Every fill runs forward in time, and contexts are cut at the origin before filling.
 # So no value at or after an origin can reach its context. Timestamps are naive UTC.
+#
+# Task sets (6a.11): "october" is TASKS, the tasks of snapshot sensbee-2026-10-01. "january" is built from the
+# January 2027 snapshot (task_set): the confirmatory period of the frozen protocol, with its hall rules (P1; plan
+# docs/plans/2026-11-14-phase-6a-11-task-sets-january-rules.md, decisions D1-D10):
+# - An open day is a UTC date with at least OPEN_DAY_BUCKETS nonzero buckets.
+# - A hall reopens on the first open day after 1 June that starts SPAN_DAYS days, all inside the data, with at least
+#   SPAN_OPEN_DAYS open days. Its season ends on the last open day before the next 1 June that ends such a span.
+# - The hall window runs from HALL_CONTEXT_DAYS after the reopening (not before CONFIRM_START) to the snapshot cutoff.
+#   A window shorter than MIN_WINDOW_DAYS is not scored.
+# - Fitted hall models train up to the window start (the period start, as for every task), from the first reopening
+#   in the data, with each closed season (season end + 1 day to the next reopening) as an exclusion. The season
+#   opening profile starts at the current reopening (season_start).
 
+import dataclasses
+import json
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Optional
 
 import numpy as np
 import pandas as pd
 
-from benchmark.snapshot import BUCKET_FREQ, BUCKETS_PER_DAY, bucket_15min
+from benchmark.snapshot import BUCKET_FREQ, BUCKETS_PER_DAY, MANIFEST_NAME, bucket_15min, load_snapshot
 from src.data_access.data_loader import CLOSURE_GAP_MINUTES, fill_event_series
 
 STEP = pd.Timedelta(BUCKET_FREQ)
@@ -35,6 +50,13 @@ VALIDATION_DAYS = 28
 CLOSURE_GAP_BUCKETS = CLOSURE_GAP_MINUTES // BUCKET_MINUTES  # visitors: ffill up to 120 min, then 0 (recorded in run.json)
 TRAIN_GAP_BUCKETS = BUCKETS_PER_DAY        # training data: gaps longer than 24 h split it, shorter ones are filled
 MIN_TRAIN_DAYS = 14                        # training pieces shorter than this are dropped
+CONFIRM_START = "2026-10-01"               # January set: start of the confirmatory period (frozen protocol)
+OPEN_DAY_BUCKETS = 16                      # January hall rules (P1, header): an open day's nonzero buckets
+SPAN_DAYS = 7
+SPAN_OPEN_DAYS = 5
+HALL_CONTEXT_DAYS = 28                     # the hall window starts this many days after the reopening
+MIN_WINDOW_DAYS = 14                       # a shorter hall window is reported as "too short"
+CLOSED_SEASON = "closed season (P1)"       # reason of a closed season in a task's exclusions
 
 
 # One sensor's forecasting task.
@@ -44,6 +66,7 @@ MIN_TRAIN_DAYS = 14                        # training pieces shorter than this a
 # Periods are naive UTC. Validation is the VALIDATION_DAYS before test_start.
 # exclusions: (start, end, reason), as [start, end) in naive UTC.
 # train_start: where a fitted model's training data begins (None = the start of the series).
+# season_start: where a hall's season opening profile begins (None = train_start; set by the January rules).
 @dataclass(frozen=True)
 class SensorTask:
     column: str
@@ -54,6 +77,7 @@ class SensorTask:
     exclusions: tuple[tuple[str, str, str], ...] = ()
     secondary: bool = False
     train_start: Optional[str] = None
+    season_start: Optional[str] = None
 
 
 # Periods where event sensors were silent because of an outage, not because nothing happened.
@@ -230,3 +254,98 @@ def training_items(series: pd.Series, task: SensorTask, cutoff: pd.Timestamp) ->
     pieces = history[~split].groupby(split.cumsum()[~split])
     items = [piece.ffill().dropna() for _, piece in pieces]
     return [item for item in items if len(item) >= MIN_TRAIN_DAYS * BUCKETS_PER_DAY]
+
+
+TASK_SETS = ("october", "january")
+
+
+# Open days of a hall: True for each UTC date of the series with at least OPEN_DAY_BUCKETS buckets above 0.
+def open_days(series: pd.Series) -> pd.Series:
+    return (series > 0).groupby(series.index.normalize()).sum() >= OPEN_DAY_BUCKETS
+
+
+# The first open day in [after, before) that starts SPAN_DAYS dates, all inside the data, with at least
+# SPAN_OPEN_DAYS open days; None if there is none. `days` is open_days() output (one row per consecutive date).
+def reopening_day(days: pd.Series, after: pd.Timestamp,
+                  before: Optional[pd.Timestamp] = None) -> Optional[pd.Timestamp]:
+    ahead = days.astype(int).rolling(SPAN_DAYS).sum().shift(-(SPAN_DAYS - 1))  # NaN where the span leaves the data
+    found = days & (ahead >= SPAN_OPEN_DAYS) & (days.index >= after)
+    if before is not None:
+        found &= days.index < before
+    return found.idxmax() if found.any() else None
+
+
+# The last open day before `before` that ends SPAN_DAYS dates with at least SPAN_OPEN_DAYS open days; None if none.
+def season_end(days: pd.Series, before: pd.Timestamp) -> Optional[pd.Timestamp]:
+    behind = days.astype(int).rolling(SPAN_DAYS).sum()
+    found = days & (behind >= SPAN_OPEN_DAYS) & (days.index < before)
+    return found[found].index[-1] if found.any() else None
+
+
+# A hall's seasons in its series before `until`: (reopening, season end) in time order, one per 1 June to 1 June
+# year with a reopening. The end is None for a season still running at `until`.
+def hall_seasons(series: pd.Series, until: pd.Timestamp) -> list[tuple[pd.Timestamp, Optional[pd.Timestamp]]]:
+    days = open_days(series.loc[: until - STEP])
+    boundaries = [pd.Timestamp(year=year, month=6, day=1) for year in range(days.index[0].year - 1, until.year + 1)]
+    seasons = []
+    for start, end in zip(boundaries, [*boundaries[1:], None]):
+        reopened = reopening_day(days, start, end)
+        if reopened is not None:
+            seasons.append((reopened, None if end is None or end >= until else season_end(days, end)))
+    return seasons
+
+
+# A date as the task fields write it. The snapshot cutoff is always 00:00 UTC (scripts/snapshot_sensbee.py).
+def _date(timestamp: pd.Timestamp) -> str:
+    return timestamp.strftime("%Y-%m-%d")
+
+
+# The January task set from a snapshot's raw frames and its cutoff `until` (header: the January hall rules).
+# Weather stations keep their October task with the confirmatory period; parking is excluded (frozen protocol).
+# Returns the tasks and one note per sensor: its status ("ok", "not reopened", "too short", "excluded") and, for a
+# hall, its reopenings, season ends and window.
+def january_tasks(frames: dict[str, pd.DataFrame],
+                  until: pd.Timestamp) -> tuple[dict[str, SensorTask], dict[str, dict]]:
+    until = pd.Timestamp(until)
+    confirm_start = pd.Timestamp(CONFIRM_START)
+    summer = pd.Timestamp(year=confirm_start.year, month=6, day=1)  # the closure before the period
+    tasks: dict[str, SensorTask] = {}
+    notes: dict[str, dict] = {}
+    for name, task in TASKS.items():
+        if task.kind == "regular":
+            tasks[name] = dataclasses.replace(task, test_start=CONFIRM_START, test_end=_date(until))
+            notes[name] = {"status": "ok"}
+            continue
+        if task.kind != "visitors":
+            notes[name] = {"status": "excluded"}
+            continue
+        seasons = hall_seasons(target_series(frames[name], task), until)
+        note = {"reopenings": [_date(start) for start, _ in seasons],
+                "season_ends": [_date(end) for _, end in seasons if end is not None]}
+        current = [start for start, _ in seasons if start >= summer]
+        if not current:
+            notes[name] = {"status": "not reopened", **note}
+            continue
+        start = max(confirm_start, current[0] + pd.Timedelta(days=HALL_CONTEXT_DAYS))
+        note["window"] = [_date(start), _date(until)]
+        if until - start < pd.Timedelta(days=MIN_WINDOW_DAYS):
+            notes[name] = {"status": "too short", **note}
+            continue
+        closed = tuple((_date(end + pd.Timedelta(days=1)), _date(reopened), CLOSED_SEASON)
+                       for (_, end), (reopened, _) in zip(seasons, seasons[1:]))
+        tasks[name] = dataclasses.replace(task, test_start=_date(start), test_end=_date(until),
+                                          exclusions=(*task.exclusions, *closed), train_start=_date(seasons[0][0]),
+                                          season_start=_date(current[0]))
+        notes[name] = {"status": "ok", **note}
+    return tasks, notes
+
+
+# The tasks of a named task set (TASK_SETS) and their notes. "october" is TASKS with no notes; "january" is built
+# from the snapshot in snapshot_dir and its manifest's cutoff ("until"), see january_tasks.
+def task_set(name: str, snapshot_dir: Path) -> tuple[dict[str, SensorTask], dict[str, dict]]:
+    if name == "october":
+        return TASKS, {}
+    if name == "january":
+        manifest = json.loads((Path(snapshot_dir) / MANIFEST_NAME).read_text())
+        return january_tasks(load_snapshot(Path(snapshot_dir)), pd.Timestamp(manifest["until"]))
+    raise ValueError(f"UNKNOWN TASK SET {name}")

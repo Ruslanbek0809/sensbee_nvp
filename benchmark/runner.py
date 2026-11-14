@@ -3,7 +3,7 @@
 # - forecasts.csv.gz: every valid origin, step and quantile with the true value;
 # - metrics.csv: per origin and horizon;
 # - origins.csv: every candidate origin with its validity;
-# - run.json: snapshot, tasks, model, seed, code commit, versions, counts.
+# - run.json: snapshot, task set, tasks, model, seed, code commit, versions, counts.
 #
 # Forecaster contract: f(contexts, horizon, levels, seed) -> (quantiles [n, horizon, levels], status per origin).
 # - The status is "ok" or "fallback". The forecaster reports its own fallbacks.
@@ -247,12 +247,14 @@ def _fit_pooled(trainer: Trainer, kind: str, tasks: dict[str, SensorTask], frame
 # origin_stride=k evaluates every k-th valid origin.
 # covariates: a covariate set name (see the header). Every task must be of the set's kind.
 # pooled: one fit per sensor kind (see the header); needs a trainer, no covariates, and at least 2 sensors per kind.
+# task_set: the name of the task set the tasks come from (tasks.TASK_SETS), recorded so a report can't mix sets.
 # Raises FileExistsError if that folder exists. Returns the run folder.
 def run(forecaster: Optional[Forecaster], model: str, snapshot_dir: Path, out_root: Path,
         tasks: Optional[dict[str, SensorTask]] = None, period: str = "test",
         context_days: tuple[Optional[int], ...] = CONTEXT_DAYS, seed: int = 0, run_id: Optional[str] = None,
         model_params: Optional[dict] = None, model_info: Optional[dict] = None, trainer: Optional[Trainer] = None,
-        origin_stride: int = 1, covariates: Optional[str] = None, pooled: bool = False) -> Path:
+        origin_stride: int = 1, covariates: Optional[str] = None, pooled: bool = False,
+        task_set: str = "october") -> Path:
     if (forecaster is None) == (trainer is None):
         raise ValueError("GIVE EITHER A FORECASTER OR A TRAINER")
     if origin_stride < 1:
@@ -350,6 +352,7 @@ def run(forecaster: Optional[Forecaster], model: str, snapshot_dir: Path, out_ro
         "seed": seed,
         "snapshot": {"id": manifest["snapshot_id"], "manifest_sha256": sha256_file(snapshot_dir / MANIFEST_NAME)},
         "period": period,
+        "task_set": task_set,
         "context_days": [days if days is not None else "all" for days in context_days],
         "validity_context_days": list(validity_context_days(context_days)),
         "origin_stride": origin_stride,

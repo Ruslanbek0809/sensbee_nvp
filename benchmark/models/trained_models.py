@@ -24,6 +24,8 @@
 # - Without validation data AutoGluon gives GluonTS models no early stopping.
 # - So DeepAR and PatchTST stop on the final TUNING_DAYS before the cutoff.
 #   Those days are held out of training and validated one day at a time.
+#   When the last training item can't hold them plus an input window (a hall's 28-day new season under the January
+#   rules, 6a.11 D8), they come from the last item that can; the items after it stay training items.
 #   GluonTS keeps the epoch with the lowest validation loss.
 # - DeepAR's validation loss also scores the context_length - 1 steps before each validated day
 #   (DeepARLightningModule.validation_step has no future_only).
@@ -108,19 +110,22 @@ def input_steps(params: dict) -> int:
     return params["context_length"]
 
 
-# Splits training items for early stopping on the last `days` days.
-# Training then ends `days` days plus `holdout` steps before the end of the last item.
+# Splits training items for early stopping on the last `days` days of the last item that can hold them: shortened,
+# it must still hold one full input window plus a horizon (usually the last item; D8 in the header).
+# Training on that item then ends `days` days plus `holdout` steps before its end; the other items stay as they are.
 # The tuning data holds `days` copies of that item, cut 0, 1, ... days before its end.
 # So the model validates on each of the final days: the last HORIZON steps of each tuning item, plus the `holdout`
 # steps before them that a GluonTS validation loss also scores.
-# Raises when the shortened item can't hold one full input window plus a horizon.
+# Raises when no item can hold them.
 def tuning_split(items: list[pd.Series], days: int, steps: int,
                  holdout: int = 0) -> tuple[list[pd.Series], list[pd.Series]]:
-    last = items[-1]
-    keep = len(last) - days * BUCKETS_PER_DAY - holdout
-    if keep < steps + HORIZON:
-        raise ValueError(f"LAST TRAINING ITEM OF {len(last)} STEPS IS TOO SHORT FOR {days} TUNING DAYS")
-    return [*items[:-1], last.iloc[:keep]], [last.iloc[: len(last) - k * BUCKETS_PER_DAY] for k in range(days)]
+    for i in range(len(items) - 1, -1, -1):
+        item = items[i]
+        keep = len(item) - days * BUCKETS_PER_DAY - holdout
+        if keep >= steps + HORIZON:
+            return ([*items[:i], item.iloc[:keep], *items[i + 1:]],
+                    [item.iloc[: len(item) - k * BUCKETS_PER_DAY] for k in range(days)])
+    raise ValueError(f"EVERY TRAINING ITEM IS TOO SHORT FOR {days} TUNING DAYS (last item {len(items[-1])} steps)")
 
 
 # Reads three numbers from the Lightning logs a GluonTS model keeps with keep_lightning_logs:
