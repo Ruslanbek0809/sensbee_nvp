@@ -15,6 +15,8 @@
 #   training items starting where it is defined; "stations96" (neighbours 24 h earlier, known) and "wx" (Manebach
 #   weather for the halls, past) leak nothing at or after the origin
 # - Phase 6a step 6a.11 (P1): the season profile from the current season only; a trainer's rows skip a closed season
+# - Phase 6a step 6a.12 (X3): a "stations" run takes its neighbours from its task set (the DWD trio on the external
+#   set), all of them even when the run forecasts one station
 
 import dataclasses
 import json
@@ -29,7 +31,7 @@ from benchmark import covariates as cov
 from benchmark.models.mask_models import mask_forecaster, recent_mask_forecaster
 from benchmark.runner import _predict, naive_forecaster, run
 from benchmark.snapshot import MANIFEST_NAME, write_raw_csv
-from benchmark.tasks import HORIZON, QUANTILE_LEVELS, TASKS, SensorTask, target_series
+from benchmark.tasks import EXTERNAL_TASKS, HORIZON, QUANTILE_LEVELS, TASKS, SensorTask, target_series
 
 TIMES = pd.date_range("2026-01-01", "2026-02-10", freq="15min", inclusive="left")  # 40 days of 15-min rows
 STATION = "MANEBACH_WEATHER_STATION"
@@ -273,6 +275,37 @@ def test_a_trainer_gets_only_known_columns_before_the_cutoff(tmp_path):
     (frame,) = received
     assert list(frame.columns) == list(cov.SUN)
     assert frame.index[-1] == pd.Timestamp("2026-02-01") - pd.Timedelta("15min")
+
+
+# Writes a snapshot with one weather raw frame per name (distinct ramps) and returns its folder.
+def _weather_snapshot(tmp_path: Path, names: tuple[str, ...]) -> Path:
+    snapshot_dir = tmp_path / "snapshot"
+    sensors = {}
+    for i, name in enumerate(names):
+        sha256 = write_raw_csv(_weather_raw(i), snapshot_dir / "raw" / f"{name}.csv.gz")
+        sensors[name] = {"file": f"raw/{name}.csv.gz", "sha256": sha256}
+    (snapshot_dir / MANIFEST_NAME).write_text(json.dumps({"snapshot_id": "test-snapshot", "sensors": sensors}))
+    return snapshot_dir
+
+
+# A run on one station gets every other weather station of its task set as neighbours: the DWD pair on the external
+# set (from a snapshot without any SensBee name), the SensBee pair on the October set. Neighbours taken from the
+# run's own tasks would leave a one-station run with none.
+@pytest.mark.parametrize("task_set, names, neighbours", [
+    ("external", tuple(EXTERNAL_TASKS), ("DWD_SCHMUECKE", "DWD_NEUHAUS")),
+    ("october", cov.STATIONS, ("STUTZERBACH_WEATHER_STATION", "FRAUENWALD_WEATHER_STATION")),
+])
+def test_a_stations_run_takes_every_neighbour_of_its_task_set(tmp_path, task_set, names, neighbours):
+    snapshot_dir = _weather_snapshot(tmp_path, names)
+    tasks = {names[0]: SensorTask("temperature", "AVG", "regular", "2026-02-01", "2026-02-03")}
+    calls = []
+    run_dir = run(_recording_forecaster(calls), "rec+stations", snapshot_dir, tmp_path / "runs", tasks=tasks,
+                  context_days=(1,), covariates="stations", task_set=task_set)
+    expected = [*cov.SUN, *[f"temperature_{name}" for name in neighbours]]
+    assert calls and all(columns == expected for _, _, columns in calls)
+    record = json.loads((run_dir / "run.json").read_text())
+    assert record["task_set"] == task_set
+    assert list(record["counts"][names[0]]["covariates"]["columns"]) == expected
 
 
 def test_the_mask_zeroes_exactly_the_closed_slots_and_keeps_the_rest():

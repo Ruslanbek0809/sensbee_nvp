@@ -22,6 +22,8 @@
 # - Fitted hall models train up to the window start (the period start, as for every task), from the first reopening
 #   in the data, with each closed season (season end + 1 day to the next reopening) as an exclusion. The season
 #   opening profile starts at the current reopening (season_start).
+# "external" (6a.12 X3) is EXTERNAL_TASKS: three DWD stations near Ilmenau on the SensBee weather windows, from an
+# external-<until> snapshot (scripts/snapshot_external.py).
 
 import dataclasses
 import json
@@ -256,7 +258,23 @@ def training_items(series: pd.Series, task: SensorTask, cutoff: pd.Timestamp) ->
     return [item for item in items if len(item) >= MIN_TRAIN_DAYS * BUCKETS_PER_DAY]
 
 
-TASK_SETS = ("october", "january")
+# The external set (6a.12 X3): DWD 10-minute air temperature (TT_10) of Martinroda (03204), Schmücke (04501) and
+# Neuhaus am Rennweg (03513), on the same validation and test windows as the SensBee weather stations.
+EXTERNAL_TASKS: dict[str, SensorTask] = {
+    name: SensorTask("temperature", "AVG", "regular", "2026-08-06", "2026-10-01")
+    for name in ("DWD_MARTINRODA", "DWD_SCHMUECKE", "DWD_NEUHAUS")
+}
+
+TASK_SETS = ("october", "january", "external")
+
+
+# The weather stations of a task set: its "regular" sensors, the neighbours of the "stations" covariate sets.
+# Fixed per set, so a run on some of its sensors still gets all of them. "january" keeps the October stations.
+def set_stations(name: str) -> tuple[str, ...]:
+    if name not in TASK_SETS:
+        raise ValueError(f"UNKNOWN TASK SET {name}")
+    tasks = EXTERNAL_TASKS if name == "external" else TASKS
+    return tuple(sensor for sensor, task in tasks.items() if task.kind == "regular")
 
 
 # Open days of a hall: True for each UTC date of the series with at least OPEN_DAY_BUCKETS buckets above 0.
@@ -340,11 +358,14 @@ def january_tasks(frames: dict[str, pd.DataFrame],
     return tasks, notes
 
 
-# The tasks of a named task set (TASK_SETS) and their notes. "october" is TASKS with no notes; "january" is built
-# from the snapshot in snapshot_dir and its manifest's cutoff ("until"), see january_tasks.
+# The tasks of a named task set (TASK_SETS) and their notes. "october" is TASKS and "external" EXTERNAL_TASKS, with
+# no notes; "january" is built from the snapshot in snapshot_dir and its manifest's cutoff ("until"), see
+# january_tasks.
 def task_set(name: str, snapshot_dir: Path) -> tuple[dict[str, SensorTask], dict[str, dict]]:
     if name == "october":
         return TASKS, {}
+    if name == "external":
+        return EXTERNAL_TASKS, {}
     if name == "january":
         manifest = json.loads((Path(snapshot_dir) / MANIFEST_NAME).read_text())
         return january_tasks(load_snapshot(Path(snapshot_dir)), pd.Timestamp(manifest["until"]))

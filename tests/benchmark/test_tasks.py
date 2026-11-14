@@ -6,7 +6,8 @@
 # - nothing at or after an origin reaches its context or scale
 # - the training items of fitted models (gap splits, minimum length, train_start, exclusions)
 # - the task sets: the October set unchanged; the January set's hall rules (P1: reopening day, season end, window,
-#   training cut at the window start without the closed season)
+#   training cut at the window start without the closed season); the external set (6a.12 X3: the DWD trio on the
+#   SensBee weather windows) and each set's weather stations
 
 import dataclasses
 import math
@@ -19,9 +20,9 @@ import pytest
 
 from benchmark.metrics import seasonal_scale
 from benchmark.tasks import (
-    GUARD, STREAM_OUTAGE, TASKS, SensorTask, candidate_origins, context_window, january_tasks, open_days,
-    origin_table, period_bounds, reopening_day, scale_history, season_end, target_series, target_window, task_set,
-    training_items, training_series,
+    EXTERNAL_TASKS, GUARD, STREAM_OUTAGE, TASKS, SensorTask, candidate_origins, context_window, january_tasks,
+    open_days, origin_table, period_bounds, reopening_day, scale_history, season_end, set_stations, target_series,
+    target_window, task_set, training_items, training_series,
 )
 from src.data_access.sensbee_client import SensbeeClient, load_sensor_series_from_api
 
@@ -367,4 +368,28 @@ def test_the_october_set_is_the_static_tasks(tmp_path):
     assert task_set("october", tmp_path) == (TASKS, {})
     assert all(task.season_start is None for task in TASKS.values())
     with pytest.raises(ValueError, match="UNKNOWN TASK SET"):
-        task_set("external", tmp_path)
+        task_set("march", tmp_path)
+
+
+# The external set: the three DWD stations as weather tasks with exactly the SensBee weather windows, so the two
+# can be compared period for period. It needs no snapshot.
+def test_the_external_set_is_the_dwd_trio_on_the_sensbee_weather_windows(tmp_path):
+    tasks, notes = task_set("external", tmp_path)
+    assert list(tasks) == ["DWD_MARTINRODA", "DWD_SCHMUECKE", "DWD_NEUHAUS"] and notes == {}
+    assert tasks is EXTERNAL_TASKS
+    sensbee = TASKS["MANEBACH_WEATHER_STATION"]
+    for task in tasks.values():
+        assert task == sensbee
+        for period in ("test", "validation"):
+            assert period_bounds(task, period) == period_bounds(sensbee, period)
+    assert period_bounds(sensbee, "validation") == (pd.Timestamp("2026-07-09"), pd.Timestamp("2026-08-06"))
+    assert period_bounds(sensbee, "test") == (pd.Timestamp("2026-08-06"), pd.Timestamp("2026-10-01"))
+
+
+# The neighbours of the "stations" covariate sets are all weather stations of the whole set.
+def test_each_task_set_has_its_own_weather_stations():
+    sensbee = ("MANEBACH_WEATHER_STATION", "STUTZERBACH_WEATHER_STATION", "FRAUENWALD_WEATHER_STATION")
+    assert set_stations("october") == set_stations("january") == sensbee
+    assert set_stations("external") == ("DWD_MARTINRODA", "DWD_SCHMUECKE", "DWD_NEUHAUS")
+    with pytest.raises(ValueError, match="UNKNOWN TASK SET"):
+        set_stations("march")

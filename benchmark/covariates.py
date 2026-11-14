@@ -28,8 +28,8 @@
 #   winter 01.02.-06.02.2027, Easter 22.03.-03.04.2027), both checked 2026-10-26. Easter 2027 is 28 March.
 # Solar elevation: NOAA Global Monitoring Division, "General Solar Position Calculations" (gml.noaa.gov/grad/solcalc/
 # solareqns.PDF, checked 2026-10-14). It is computed at one point for Ilmenau (de.wikipedia.org/wiki/Ilmenau:
-# 50.687 N, 10.914 E, checked 2026-10-14). The weather stations lie within about 10 km, which moves the sun angle by
-# a fraction of a degree.
+# 50.687 N, 10.914 E, checked 2026-10-14). The SensBee weather stations lie within about 10 km and the DWD stations of
+# the external set within about 26 km, which moves the sun angle by a fraction of a degree.
 # The opening profile (D4-1): per Berlin weekday and 15-min local slot, the share of days with visitors_total > 0.
 # It is taken from the hall's training data before the cutoff (from task.train_start, without the task's exclusions;
 # from task.season_start when set, the current season only under the January hall rules, P1).
@@ -239,9 +239,11 @@ def open_share(index: pd.DatetimeIndex, profile: np.ndarray) -> np.ndarray:
 # Weather columns are SensBee AVG buckets, unfilled. The runner checks that the set matches the sensor's task kind.
 # span: [start, end) over which the stations96 observed shares and the wx source shares are recorded (the runner
 # passes the evaluated windows; None = the whole frame).
+# stations: the weather stations whose temperature the "stations" and "stations96" groups take (the sensor itself is
+# skipped); the runner passes its task set's stations (tasks.set_stations).
 def build(name: str, sensor: str, frames: dict[str, pd.DataFrame], series: pd.Series, task: SensorTask,
-          cutoff: pd.Timestamp,
-          span: Optional[tuple[pd.Timestamp, pd.Timestamp]] = None) -> tuple[pd.DataFrame, dict[str, str], dict]:
+          cutoff: pd.Timestamp, span: Optional[tuple[pd.Timestamp, pd.Timestamp]] = None,
+          stations: tuple[str, ...] = STATIONS) -> tuple[pd.DataFrame, dict[str, str], dict]:
     spec = COVARIATE_SETS[name]
     index = series.index
 
@@ -274,14 +276,14 @@ def build(name: str, sensor: str, frames: dict[str, pd.DataFrame], series: pd.Se
                 columns[variable] = bucket_15min(frames[sensor], variable, "AVG").reindex(index).to_numpy()
                 kinds[variable] = GROUP_KINDS[group]
         elif group == "stations":
-            for station in STATIONS:
+            for station in stations:
                 if station != sensor:
                     column = f"temperature_{station}"
                     columns[column] = bucket_15min(frames[station], "temperature", "AVG").reindex(index).to_numpy()
                     kinds[column] = GROUP_KINDS[group]
         elif group == "stations96":
             grid = pd.date_range(index[0], index[-1], freq=BUCKET_FREQ)
-            for station in STATIONS:
+            for station in stations:
                 if station != sensor:
                     column = f"temperature_{station}_lag{LAG_STEPS}"
                     lagged = bucket_15min(frames[station], "temperature", "AVG").reindex(grid).shift(LAG_STEPS)

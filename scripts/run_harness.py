@@ -3,8 +3,9 @@
 #
 # --dry-run lists the forecast origins per sensor (valid, and why the others are not) and writes nothing.
 # With --contexts, the validity rule also covers those context lengths, as in a run.
-# --task-set picks the tasks (benchmark/tasks.py): "october" (default, TASKS) or "january", built from the snapshot
-# with the January hall rules (P1). Its notes (hall reopenings, season ends, windows, sensors left out) are printed.
+# --task-set picks the tasks (benchmark/tasks.py): "october" (default, TASKS), "january", built from the snapshot
+# with the January hall rules (P1), or "external" (the DWD stations of an external-<until> snapshot,
+# scripts/snapshot_external.py). The January notes (hall reopenings, season ends, windows, sensors left out) are printed.
 #
 # Without --dry-run, one forecaster runs over the tasks. It writes raw forecasts, metrics and a run manifest to a new
 # folder under --out. Then it prints the mean metrics per sensor, context and horizon. The forecaster is one of:
@@ -34,6 +35,8 @@
 #   venv/bin/python scripts/run_harness.py --snapshot ../../benchmark_data/snapshots/sensbee-2026-10-01 --dry-run
 #   venv/bin/python scripts/run_harness.py --snapshot <dir> --dry-run --contexts 1 2 7 14 28 56 85 169
 #   venv/bin/python scripts/run_harness.py --snapshot <january snapshot> --task-set january --dry-run
+#   venv/bin/python scripts/run_harness.py --snapshot ../../benchmark_data/snapshots/external-2026-10-01 \
+#       --task-set external --dry-run
 #   venv/bin/python scripts/run_harness.py --snapshot <dir> --out <dir> --model seasonal_naive_96
 #   venv/bin/python scripts/run_harness.py --snapshot <dir> --out <dir> --model seasonal_naive_672 --contexts 28
 #   venv/bin/python scripts/run_harness.py --snapshot <dir> --out <dir> --model naive --origin-stride 7
@@ -67,7 +70,7 @@ from benchmark.models import (  # noqa: E402
 from benchmark.runner import CHECK_FORECASTERS, run  # noqa: E402
 from benchmark.snapshot import load_snapshot  # noqa: E402
 from benchmark.tasks import (  # noqa: E402
-    CONTEXT_DAYS, TASK_SETS, TASKS, SensorTask, origin_table, target_series, task_set, validity_context_days,
+    CONTEXT_DAYS, TASK_SETS, SensorTask, origin_table, target_series, task_set, validity_context_days,
 )
 
 INVALID_REASONS = ("excluded", "short_history", "target_gap", "recent_gap", "low_coverage")
@@ -124,8 +127,9 @@ def main() -> None:
                         help="check forecaster, baseline, zero-shot, trained, fine-tuned or LLMTime model")
     parser.add_argument("--dry-run", action="store_true", help="list the origins per sensor and write nothing")
     parser.add_argument("--task-set", choices=TASK_SETS, default="october",
-                        help="the tasks: october (TASKS) or january (built from the snapshot, hall rules P1)")
-    parser.add_argument("--sensors", nargs="+", choices=list(TASKS), help="default: every sensor of the task set")
+                        help="the tasks: october (TASKS), january (built from the snapshot, hall rules P1) or "
+                             "external (the DWD stations)")
+    parser.add_argument("--sensors", nargs="+", help="default: every sensor of the task set")
     parser.add_argument("--period", choices=["test", "validation"], default="test")
     parser.add_argument("--contexts", nargs="+",
                         help="context lengths in days, or 'all' for the whole history before each origin "

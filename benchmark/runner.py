@@ -30,6 +30,8 @@
 # start ("Pooling" in the thesis evaluation rules). That one model then forecasts every sensor of the kind.
 # Covariates (Phase 4): with covariates=<set name> (benchmark/covariates.py), the forecaster is called with
 # covariates=[one DataFrame per context: its timestamps plus the HORIZON steps from the origin].
+# The neighbour stations of a "stations" set are all weather stations of the run's task set (tasks.set_stations), not
+# only the run's own tasks.
 # These frames are built only by covariates.covariate_window(), which hides the future of past-only columns.
 # A trainer is called with covariates=<the known columns before the cutoff>.
 # Without covariates the calls are unchanged.
@@ -55,7 +57,8 @@ from benchmark.snapshot import (
 from benchmark.tasks import (
     CLOSURE_GAP_BUCKETS, CONTEXT_DAYS, GUARD, HORIZON, MIN_CONTEXT_COVERAGE, MIN_TRAIN_DAYS, ORIGIN_FREQ,
     QUANTILE_LEVELS, REPORT_STEPS, SCALE_DAYS, SEASON, TASKS, VALIDATION_DAYS, SensorTask, context_window,
-    origin_table, period_bounds, scale_history, target_series, target_window, training_items, validity_context_days,
+    origin_table, period_bounds, scale_history, set_stations, target_series, target_window, training_items,
+    validity_context_days,
 )
 
 logger = logging.getLogger(__name__)
@@ -298,7 +301,8 @@ def run(forecaster: Optional[Forecaster], model: str, snapshot_dir: Path, out_ro
         frame, kinds = None, {}
         if covariates is not None:
             longest = pd.Timedelta(days=max(validity_context_days(context_days)))
-            frame, kinds, info = cov.build(covariates, sensor, frames, series, task, start, (start - longest, end))
+            frame, kinds, info = cov.build(covariates, sensor, frames, series, task, start, (start - longest, end),
+                                           set_stations(task_set))
             counts[sensor]["covariates"] = {"columns": kinds,
                                             "coverage": cov.coverage(frame, kinds, start - longest, end), **info}
         sensor_forecaster = forecaster
